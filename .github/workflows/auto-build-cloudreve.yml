@@ -93,7 +93,7 @@ jobs:
           echo "✅ 下载链接：$DOWNLOAD_URL"
           
           # 6. 创建目录并下载
-          mkdir -p cloudreve/app/bin
+          mkdir -p Cloudreve/app/bin
           curl -SL --retry 3 --connect-timeout 10 -o /tmp/cloudreve.tar.gz "$DOWNLOAD_URL"
           
           # 7. 解压并验证二进制文件
@@ -104,14 +104,14 @@ jobs:
           fi
           
           # 8. 移动文件+添加执行权限
-          mv /tmp/cloudreve cloudreve/app/bin/
-          chmod +x cloudreve/app/bin/cloudreve
+          mv /tmp/cloudreve Cloudreve/app/bin/
+          chmod +x Cloudreve/app/bin/cloudreve
           rm -rf /tmp/cloudreve.tar.gz /tmp/cloudreve
           
           # 9. 验证文件信息
           echo "✅ 下载完成，文件信息："
-          ls -lh cloudreve/app/bin/cloudreve
-          file cloudreve/app/bin/cloudreve
+          ls -lh Cloudreve/app/bin/cloudreve
+          file Cloudreve/app/bin/cloudreve
 
       - name: 7. 更新manifest的version字段
         if: steps.compare.outputs.need_update == 'true'
@@ -139,11 +139,8 @@ jobs:
       - name: 9. 执行fnpack打包
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          cd cloudreve
-          echo "📋 打包目录结构："
-          ls -lh app/bin/
           echo "🚀 执行打包命令：fnpack build --directory app"
-          fnpack build --directory app
+          fnpack build --directory Cloudreve
           echo "✅ fnpack打包完成"
 
       # ===================== 可选：上传打包产物 =====================
