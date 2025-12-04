@@ -1,0 +1,129 @@
+name: 版本比对后自动打包Cloudreve
+
+on:
+  workflow_dispatch:  # 手动触发
+  schedule:
+    - cron: '0 0 * * *'  # 每日UTC 0点（北京时间8点）自动检测
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # ===================== 第一步：环境准备 =====================
+      - name: 1. 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 2. 安装基础依赖（jq/curl/sed）
+        run: |
+          sudo apt update && sudo apt install -y jq curl sed
+          echo "基础依赖安装完成"
+
+      # ===================== 第二步：版本比对（核心前置） =====================
+      - name: 3. 读取本地manifest版本号
+        id: local_ver
+        run: |
+          if [ -f "cloudreve/manifest" ]; then
+            # 提取version字段（兼容多格式，去除v前缀/引号）
+            LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' cloudreve/manifest \
+              | tr -d '"' | tr -d "'" | sed 's/^v//' | xargs)
+            echo "本地manifest版本：$LOCAL_VERSION"
+            echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 未找到cloudreve/manifest，强制触发更新"
+            echo "local_version=0.0.0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 4. 获取Cloudreve官方最新正式版版本号
+        id: remote_ver
+        run: |
+          # 仅获取版本号（轻量请求）
+          REMOTE_VERSION=$(curl -sSL -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest" \
+            | jq -r '.tag_name' | sed 's/^v//' | xargs)
+          
+          if [ -z "$REMOTE_VERSION" ] || [ "$REMOTE_VERSION" = "null" ]; then
+            echo "❌ 获取远程版本失败"
+            exit 1
+          fi
+          
+          echo "远程最新版本：$REMOTE_VERSION"
+          echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
+
+      - name: 5. 版本比对，判断是否更新
+        id: compare
+        run: |
+          if [ "${{ steps.local_ver.outputs.local_version }}" = "${{ steps.remote_ver.outputs.remote_version }}" ]; then
+            echo "✅ 本地版本与远程版本一致（${{ steps.remote_ver.outputs.remote_version }}），无需更新"
+            echo "need_update=false" >> $GITHUB_OUTPUT
+          else
+            echo "🔄 版本不一致，开始更新打包流程"
+            echo "need_update=true" >> $GITHUB_OUTPUT
+          fi
+
+      # ===================== 第三步：仅版本不一致时执行 =====================
+      - name: 6. 下载Cloudreve最新Linux AMD64二进制文件
+        if: steps.compare.outputs.need_update == 'true'
+        id: download_cloudreve
+        run: |
+          # 获取完整发行版数据，筛选Linux AMD64下载链接
+          RELEASE_DATA=$(curl -sSL -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest")
+          
+          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r --arg filter "*linux-amd64.tar.gz" \
+            '.assets[] | select(.name | test($filter | gsub("\\*"; ".*"); "i")) | .browser_download_url')
+          
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "❌ 未找到Linux AMD64版本下载链接"
+            exit 1
+          fi
+          
+          # 创建目录并下载解压
+          mkdir -p cloudreve/app/bin
+          curl -SL -o /tmp/cloudreve.tar.gz "$DOWNLOAD_URL"
+          tar -zxf /tmp/cloudreve.tar.gz -C /tmp
+          mv /tmp/cloudreve cloudreve/app/bin/
+          chmod +x cloudreve/app/bin/cloudreve
+          rm -rf /tmp/cloudreve.tar.gz /tmp/cloudreve
+          echo "✅ Cloudreve二进制文件已下载至cloudreve/app/bin/"
+
+      - name: 7. 更新manifest的version字段
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          # 兼容多格式更新version
+          sed -i -E \
+            "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)([0-9a-zA-Z.]+)([\"']?)/\1\2${{ steps.remote_ver.outputs.remote_version }}\4/" \
+            cloudreve/manifest
+          
+          echo "✅ manifest版本已更新为：${{ steps.remote_ver.outputs.remote_version }}"
+          cat cloudreve/manifest | grep -i version
+
+      - name: 8. 下载并安装fnpack（指定地址）
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          # 下载fnpack-1.0.4-linux-amd64
+          FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
+          curl -SL -o /usr/local/bin/fnpack "$FNPACK_URL"
+          # 添加执行权限
+          chmod +x /usr/local/bin/fnpack
+          # 验证安装
+          fnpack --version || { echo "❌ fnpack安装失败"; exit 1; }
+          echo "✅ fnpack安装完成，版本：$(fnpack --version 2>/dev/null || echo "1.0.4")"
+
+      - name: 9. 执行fnpack打包
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          # 进入应用目录，指定打包目录为cloudreve/app
+          cd cloudreve
+          fnpack build --directory app
+          echo "✅ fnpack打包完成"
+
+      # ===================== 可选：上传打包产物 =====================
+      - name: 10. 上传打包产物
+        if: steps.compare.outputs.need_update == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudreve-build-${{ steps.remote_ver.outputs.remote_version }}
+          path: cloudreve/
+          retention-days: 7
