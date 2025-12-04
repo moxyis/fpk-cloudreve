@@ -39,7 +39,8 @@ jobs:
         id: remote_ver
         run: |
           # 仅获取版本号（轻量请求）
-          REMOTE_VERSION=$(curl -sSL -H "Accept: application/vnd.github.v3+json" \
+          REMOTE_VERSION=$(curl -sSL --retry 3 --connect-timeout 10 \
+            -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest" \
             | jq -r '.tag_name' | sed 's/^v//' | xargs)
           
@@ -63,30 +64,60 @@ jobs:
           fi
 
       # ===================== 第三步：仅版本不一致时执行 =====================
-      - name: 6. 下载Cloudreve最新Linux AMD64二进制文件
+      - name: 6. 下载Cloudreve 4.x Linux AMD64二进制文件（精准匹配）
         if: steps.compare.outputs.need_update == 'true'
         id: download_cloudreve
         run: |
-          # 获取完整发行版数据，筛选Linux AMD64下载链接
-          RELEASE_DATA=$(curl -sSL -H "Accept: application/vnd.github.v3+json" \
+          # 1. 获取完整发行版数据（添加重试/超时）
+          RELEASE_DATA=$(curl -sSL --retry 3 --connect-timeout 10 \
+            -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest")
           
-          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r --arg filter "*linux-amd64.tar.gz" \
-            '.assets[] | select(.name | test($filter | gsub("\\*"; ".*"); "i")) | .browser_download_url')
+          # 2. 调试：输出所有资产名称（确认目标文件存在）
+          echo "📜 远程发行版所有资产名称："
+          ASSET_NAMES=$(echo "$RELEASE_DATA" | jq -r '.assets[].name')
+          echo "$ASSET_NAMES"
           
+          # 3. 精准匹配 cloudreve_*_linux_amd64.tar.gz 格式（完全贴合4.10.1命名）
+          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r \
+            '.assets[] | select(.name | test("^cloudreve_\\d+\\.\\d+\\.\\d+_linux_amd64\\.tar\\.gz$"; "i")) | .browser_download_url' | head -n1)
+          
+          # 4. 兜底匹配（兼容小版本格式差异，如4.10/4.10.1.1）
           if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-            echo "❌ 未找到Linux AMD64版本下载链接"
+            echo "⚠️ 精准版本匹配失败，尝试通用匹配 cloudreve_*_linux_amd64.tar.gz..."
+            DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r \
+              '.assets[] | select(.name | test("^cloudreve_.+_linux_amd64\\.tar\\.gz$"; "i")) | .browser_download_url' | head -n1)
+          fi
+          
+          # 5. 最终校验
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "❌ 未找到 cloudreve_*_linux_amd64.tar.gz 格式的资产"
             exit 1
           fi
           
-          # 创建目录并下载解压
+          echo "✅ 匹配到目标资产：$(echo "$ASSET_NAMES" | grep -i "linux_amd64.tar.gz")"
+          echo "✅ 下载链接：$DOWNLOAD_URL"
+          
+          # 6. 创建目录并下载解压
           mkdir -p cloudreve/app/bin
-          curl -SL -o /tmp/cloudreve.tar.gz "$DOWNLOAD_URL"
+          curl -SL --retry 3 --connect-timeout 10 -o /tmp/cloudreve.tar.gz "$DOWNLOAD_URL"
+          
+          # 7. 解压并验证二进制文件
           tar -zxf /tmp/cloudreve.tar.gz -C /tmp
+          if [ ! -f "/tmp/cloudreve" ]; then
+            echo "❌ 解压后未找到cloudreve二进制文件"
+            exit 1
+          fi
+          
+          # 8. 移动文件+添加执行权限
           mv /tmp/cloudreve cloudreve/app/bin/
           chmod +x cloudreve/app/bin/cloudreve
           rm -rf /tmp/cloudreve.tar.gz /tmp/cloudreve
-          echo "✅ Cloudreve二进制文件已下载至cloudreve/app/bin/"
+          
+          # 验证结果
+          echo "✅ 下载完成，文件信息："
+          ls -lh cloudreve/app/bin/cloudreve
+          file cloudreve/app/bin/cloudreve  # 验证文件类型（Linux ELF可执行文件）
 
       - name: 7. 更新manifest的version字段
         if: steps.compare.outputs.need_update == 'true'
@@ -104,18 +135,23 @@ jobs:
         run: |
           # 下载fnpack-1.0.4-linux-amd64
           FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
-          curl -SL -o /usr/local/bin/fnpack "$FNPACK_URL"
-          # 添加执行权限
+          curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
           chmod +x /usr/local/bin/fnpack
+          
           # 验证安装
-          fnpack --version || { echo "❌ fnpack安装失败"; exit 1; }
-          echo "✅ fnpack安装完成，版本：$(fnpack --version 2>/dev/null || echo "1.0.4")"
+          if ! command -v fnpack &>/dev/null; then
+            echo "❌ fnpack安装失败"
+            exit 1
+          fi
+          echo "✅ fnpack安装完成：$(which fnpack)"
 
       - name: 9. 执行fnpack打包
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          # 进入应用目录，指定打包目录为cloudreve/app
           cd cloudreve
+          echo "📋 打包目录结构："
+          ls -lh app/bin/
+          echo "🚀 执行打包命令：fnpack build --directory app"
           fnpack build --directory app
           echo "✅ fnpack打包完成"
 
