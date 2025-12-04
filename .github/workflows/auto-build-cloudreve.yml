@@ -38,7 +38,7 @@ jobs:
       - name: 4. 获取Cloudreve官方最新正式版版本号
         id: remote_ver
         run: |
-          # 仅获取版本号（轻量请求）
+          # 仅获取版本号（轻量请求，添加重试/超时）
           REMOTE_VERSION=$(curl -sSL --retry 3 --connect-timeout 10 \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest" \
@@ -64,45 +64,47 @@ jobs:
           fi
 
       # ===================== 第三步：仅版本不一致时执行 =====================
-      - name: 6. 下载Cloudreve 4.x Linux AMD64二进制文件（精准匹配）
+      - name: 6. 下载Cloudreve（适配通用命名规则：cloudreve_版本号_系统_架构.tar.gz）
         if: steps.compare.outputs.need_update == 'true'
         id: download_cloudreve
         run: |
-          # 1. 获取完整发行版数据（添加重试/超时）
+          set -euo pipefail
+          
+          # 定义目标系统/架构（可按需修改）
+          TARGET_OS="linux"
+          TARGET_ARCH="amd64"
+          
+          # 1. 获取完整发行版数据
           RELEASE_DATA=$(curl -sSL --retry 3 --connect-timeout 10 \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest")
           
-          # 2. 调试：输出所有资产名称（确认目标文件存在）
+          # 2. 调试：输出所有资产名称，确认命名规则
           echo "📜 远程发行版所有资产名称："
           ASSET_NAMES=$(echo "$RELEASE_DATA" | jq -r '.assets[].name')
           echo "$ASSET_NAMES"
           
-          # 3. 精准匹配 cloudreve_*_linux_amd64.tar.gz 格式（完全贴合4.10.1命名）
-          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r \
-            '.assets[] | select(.name | test("^cloudreve_\\d+\\.\\d+\\.\\d+_linux_amd64\\.tar\\.gz$"; "i")) | .browser_download_url' | head -n1)
+          # 3. 通用匹配规则：cloudreve_任意版本号_目标系统_目标架构.tar.gz
+          # 正则解析：^cloudreve_([^_]+)_(目标系统)_(目标架构)\.tar\.gz$
+          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r --arg os "$TARGET_OS" --arg arch "$TARGET_ARCH" \
+            '.assets[] | select(.name | test("^cloudreve_[^_]+_" + $os + "_" + $arch + "\\.tar\\.gz$"; "i")) | .browser_download_url' | head -n1)
           
-          # 4. 兜底匹配（兼容小版本格式差异，如4.10/4.10.1.1）
+          # 4. 最终校验
           if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-            echo "⚠️ 精准版本匹配失败，尝试通用匹配 cloudreve_*_linux_amd64.tar.gz..."
-            DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r \
-              '.assets[] | select(.name | test("^cloudreve_.+_linux_amd64\\.tar\\.gz$"; "i")) | .browser_download_url' | head -n1)
-          fi
-          
-          # 5. 最终校验
-          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-            echo "❌ 未找到 cloudreve_*_linux_amd64.tar.gz 格式的资产"
+            echo "❌ 未找到符合规则的资产：cloudreve_版本号_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
             exit 1
           fi
           
-          echo "✅ 匹配到目标资产：$(echo "$ASSET_NAMES" | grep -i "linux_amd64.tar.gz")"
+          # 5. 提取匹配到的资产名（便于日志展示）
+          MATCHED_ASSET=$(echo "$ASSET_NAMES" | grep -i "^cloudreve_[^_]+_${TARGET_OS}_${TARGET_ARCH}\.tar\.gz$" | head -n1)
+          echo "✅ 匹配到目标资产：$MATCHED_ASSET"
           echo "✅ 下载链接：$DOWNLOAD_URL"
           
           # 6. 创建目录并下载解压
           mkdir -p cloudreve/app/bin
           curl -SL --retry 3 --connect-timeout 10 -o /tmp/cloudreve.tar.gz "$DOWNLOAD_URL"
           
-          # 7. 解压并验证二进制文件
+          # 7. 解压并验证二进制文件（Cloudreve解压后直接是可执行文件）
           tar -zxf /tmp/cloudreve.tar.gz -C /tmp
           if [ ! -f "/tmp/cloudreve" ]; then
             echo "❌ 解压后未找到cloudreve二进制文件"
@@ -114,15 +116,15 @@ jobs:
           chmod +x cloudreve/app/bin/cloudreve
           rm -rf /tmp/cloudreve.tar.gz /tmp/cloudreve
           
-          # 验证结果
+          # 9. 验证文件（确保是Linux AMD64可执行文件）
           echo "✅ 下载完成，文件信息："
           ls -lh cloudreve/app/bin/cloudreve
-          file cloudreve/app/bin/cloudreve  # 验证文件类型（Linux ELF可执行文件）
+          file cloudreve/app/bin/cloudreve | grep -q "x86-64" || echo "⚠️ 注意：文件可能不是AMD64架构"
 
       - name: 7. 更新manifest的version字段
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          # 兼容多格式更新version
+          # 兼容多格式更新version（YAML/JSON/键值对）
           sed -i -E \
             "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)([0-9a-zA-Z.]+)([\"']?)/\1\2${{ steps.remote_ver.outputs.remote_version }}\4/" \
             cloudreve/manifest
