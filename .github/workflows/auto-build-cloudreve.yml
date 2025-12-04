@@ -25,7 +25,6 @@ jobs:
         id: local_ver
         run: |
           if [ -f "cloudreve/manifest" ]; then
-            # 提取version字段（兼容多格式，去除v前缀/引号）
             LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' cloudreve/manifest \
               | tr -d '"' | tr -d "'" | sed 's/^v//' | xargs)
             echo "本地manifest版本：$LOCAL_VERSION"
@@ -38,7 +37,6 @@ jobs:
       - name: 4. 获取Cloudreve官方最新正式版版本号
         id: remote_ver
         run: |
-          # 仅获取版本号（轻量请求，添加重试/超时）
           REMOTE_VERSION=$(curl -sSL --retry 3 --connect-timeout 10 \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest" \
@@ -64,47 +62,41 @@ jobs:
           fi
 
       # ===================== 第三步：仅版本不一致时执行 =====================
-      - name: 6. 下载Cloudreve（适配通用命名规则：cloudreve_版本号_系统_架构.tar.gz）
+      - name: 6. 下载Cloudreve Linux AMD64版本（极简匹配）
         if: steps.compare.outputs.need_update == 'true'
         id: download_cloudreve
         run: |
           set -euo pipefail
-          
-          # 定义目标系统/架构（可按需修改）
-          TARGET_OS="linux"
-          TARGET_ARCH="amd64"
           
           # 1. 获取完整发行版数据
           RELEASE_DATA=$(curl -sSL --retry 3 --connect-timeout 10 \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest")
           
-          # 2. 调试：输出所有资产名称，确认命名规则
+          # 2. 调试：输出所有资产名称
           echo "📜 远程发行版所有资产名称："
-          ASSET_NAMES=$(echo "$RELEASE_DATA" | jq -r '.assets[].name')
-          echo "$ASSET_NAMES"
+          echo "$RELEASE_DATA" | jq -r '.assets[].name'
           
-          # 3. 通用匹配规则：cloudreve_任意版本号_目标系统_目标架构.tar.gz
-          # 正则解析：^cloudreve_([^_]+)_(目标系统)_(目标架构)\.tar\.gz$
-          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r --arg os "$TARGET_OS" --arg arch "$TARGET_ARCH" \
-            '.assets[] | select(.name | test("^cloudreve_[^_]+_" + $os + "_" + $arch + "\\.tar\\.gz$"; "i")) | .browser_download_url' | head -n1)
+          # 3. 极简匹配：直接筛选包含 "linux_amd64.tar.gz" 的资产（绕开正则拼接坑）
+          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r \
+            '.assets[] | select(.name | contains("linux_amd64.tar.gz")) | .browser_download_url' | head -n1)
           
-          # 4. 最终校验
+          # 4. 最终校验（明确提示）
           if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-            echo "❌ 未找到符合规则的资产：cloudreve_版本号_${TARGET_OS}_${TARGET_ARCH}.tar.gz"
+            echo "❌ 未找到包含 'linux_amd64.tar.gz' 的资产"
             exit 1
           fi
           
-          # 5. 提取匹配到的资产名（便于日志展示）
-          MATCHED_ASSET=$(echo "$ASSET_NAMES" | grep -i "^cloudreve_[^_]+_${TARGET_OS}_${TARGET_ARCH}\.tar\.gz$" | head -n1)
+          # 5. 提取匹配到的资产名
+          MATCHED_ASSET=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | contains("linux_amd64.tar.gz")) | .name' | head -n1)
           echo "✅ 匹配到目标资产：$MATCHED_ASSET"
           echo "✅ 下载链接：$DOWNLOAD_URL"
           
-          # 6. 创建目录并下载解压
+          # 6. 创建目录并下载
           mkdir -p cloudreve/app/bin
           curl -SL --retry 3 --connect-timeout 10 -o /tmp/cloudreve.tar.gz "$DOWNLOAD_URL"
           
-          # 7. 解压并验证二进制文件（Cloudreve解压后直接是可执行文件）
+          # 7. 解压并验证二进制文件
           tar -zxf /tmp/cloudreve.tar.gz -C /tmp
           if [ ! -f "/tmp/cloudreve" ]; then
             echo "❌ 解压后未找到cloudreve二进制文件"
@@ -116,15 +108,14 @@ jobs:
           chmod +x cloudreve/app/bin/cloudreve
           rm -rf /tmp/cloudreve.tar.gz /tmp/cloudreve
           
-          # 9. 验证文件（确保是Linux AMD64可执行文件）
+          # 9. 验证文件信息
           echo "✅ 下载完成，文件信息："
           ls -lh cloudreve/app/bin/cloudreve
-          file cloudreve/app/bin/cloudreve | grep -q "x86-64" || echo "⚠️ 注意：文件可能不是AMD64架构"
+          file cloudreve/app/bin/cloudreve
 
       - name: 7. 更新manifest的version字段
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          # 兼容多格式更新version（YAML/JSON/键值对）
           sed -i -E \
             "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)([0-9a-zA-Z.]+)([\"']?)/\1\2${{ steps.remote_ver.outputs.remote_version }}\4/" \
             cloudreve/manifest
@@ -135,12 +126,10 @@ jobs:
       - name: 8. 下载并安装fnpack（指定地址）
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          # 下载fnpack-1.0.4-linux-amd64
           FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
           curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
           chmod +x /usr/local/bin/fnpack
           
-          # 验证安装
           if ! command -v fnpack &>/dev/null; then
             echo "❌ fnpack安装失败"
             exit 1
