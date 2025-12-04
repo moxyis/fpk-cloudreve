@@ -1,0 +1,18 @@
+{
+    ".url": {
+        "fpk-cloudreve.Application": {
+            "title": "Cloudreve",
+            "icon": "images/icon_{0}.png",
+            "type": "url",
+            "protocol": "",
+            "port": "5212",
+            "url": "/",
+            "allUsers": false,
+            "control": {
+                "accessPerm": "readonly",
+                "portPerm": "editable", 
+                "pathPerm": "readonly"
+            }
+        }
+    }
+}

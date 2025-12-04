@@ -1,0 +1,26 @@
+[
+{
+"stepTitle":"应用配置",
+"items": [
+{
+    "type": "tips",
+    "helpText": "下方的配置默认不需要填写，仅限Cloudreve Pro 版填写配置信息。</br>如需Cloudreve Pro 版 <a target=\"_blank\" href=\"https://cloudreve.org/purchase\">前往购买</a>"
+},
+{
+    "type": "password",
+    "field": "cloudreve_key",
+    "label": "Cloudreve Pro 版授权密钥",
+    "rules": [
+        {
+            "required": false,
+            "message": "请输入授权密钥"
+        },
+        {
+            "min": 6,
+            "message": "授权密钥长度不能少于6位"
+        }
+    ]
+}
+]
+}
+]

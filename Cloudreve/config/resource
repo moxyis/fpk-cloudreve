@@ -1,0 +1,28 @@
+{
+    "data-share":
+    {
+        "shares":
+        [
+            {
+                "name": "fpk-cloudreve",
+                "permission":
+                {
+                    "rw":
+                    [
+                        "fpk-cloudreve"
+                    ]
+                }
+            },
+            {
+                "name": "fpk-cloudreve/data",
+                "permission":
+                {
+                    "rw":
+                    [
+                        "fpk-cloudreve"
+                    ]
+                }
+            }
+        ]
+    }
+}
