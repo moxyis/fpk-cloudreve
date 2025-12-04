@@ -160,45 +160,50 @@ jobs:
           fi
           echo "✅ fnpack安装完成：$(which fnpack)"
 
-      - name: 11. 执行fnpack打包
+      - name: 11. 进入Cloudreve目录执行fnpack打包（核心修改）
         if: steps.compare.outputs.need_update == 'true'
         id: build_fpk
         run: |
-          # 执行打包并定位fpk文件
-          echo "🚀 执行打包命令：fnpack build --directory Cloudreve"
-          fnpack build --directory Cloudreve
+          # 进入Cloudreve目录
+          cd Cloudreve
+          echo "🚀 进入Cloudreve目录，执行打包命令：fnpack build"
+          fnpack build
           
-          # 查找打包后的fpk文件（兼容fnpack输出路径）
-          FPK_FILE=$(find Cloudreve -name "*.fpk" -type f | head -n1)
+          # 查找打包后的fpk文件（当前目录即Cloudreve）
+          FPK_FILE=$(find . -name "*.fpk" -type f | head -n1)
           if [ -z "$FPK_FILE" ]; then
             echo "❌ 未找到打包后的fpk文件"
             exit 1
           fi
           
-          # 重命名fpk文件（带版本号，便于识别）
-          FPK_NEW_NAME="cloudreve-${{ steps.remote_ver.outputs.remote_version }}.fpk"
-          mv "$FPK_FILE" "/tmp/$FPK_NEW_NAME"
+          # 拼接完整路径（便于后续复制）
+          FPK_FULL_PATH=$(pwd)/$FPK_FILE
+          # 重命名为固定名称 fpk-cloudreve.fpk
+          FPK_FIXED_NAME="fpk-cloudreve.fpk"
+          mv "$FPK_FULL_PATH" /tmp/$FPK_FIXED_NAME
           
-          echo "✅ fnpack打包完成，fpk文件：/tmp/$FPK_NEW_NAME"
-          echo "fpk_file=/tmp/$FPK_NEW_NAME" >> $GITHUB_OUTPUT
-          echo "fpk_name=$FPK_NEW_NAME" >> $GITHUB_OUTPUT
+          echo "✅ fnpack打包完成，fpk文件：/tmp/$FPK_FIXED_NAME"
+          echo "fpk_file=/tmp/$FPK_FIXED_NAME" >> $GITHUB_OUTPUT
+          echo "fpk_name=$FPK_FIXED_NAME" >> $GITHUB_OUTPUT
 
       # ===================== 第四步：推送fpk到FnDepot仓库 =====================
       - name: 12. 克隆FnDepot仓库（目标仓库）
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          # 使用PAT令牌克隆（GITHUB_TOKEN仅限当前仓库，跨仓库需手动创建PAT）
-          # 注意：需在当前仓库Secrets中配置名为 FnDepot_PAT 的令牌（权限：repo）
+          # 使用PAT令牌克隆（需在当前仓库Secrets配置 FnDepot_PAT）
           git clone https://${{ secrets.FnDepot_PAT }}@github.com/moxyis/FnDepot.git /tmp/FnDepot
           echo "✅ 成功克隆FnDepot仓库到/tmp/FnDepot"
 
-      - name: 13. 复制fpk文件到FnDepot仓库目标目录
+      - name: 13. 复制fpk文件到FnDepot仓库目标目录（覆盖旧文件）
         if: steps.compare.outputs.need_update == 'true'
         run: |
           # 创建目标文件夹（若不存在）
           mkdir -p /tmp/FnDepot/fpk-cloudreve
           
-          # 复制fpk文件
+          # 先删除旧的fpk文件（避免冗余）
+          rm -f /tmp/FnDepot/fpk-cloudreve/fpk-cloudreve.fpk
+          
+          # 复制新的fpk文件
           cp ${{ steps.build_fpk.outputs.fpk_file }} /tmp/FnDepot/fpk-cloudreve/
           
           echo "✅ fpk文件已复制到：/tmp/FnDepot/fpk-cloudreve/${{ steps.build_fpk.outputs.fpk_name }}"
@@ -212,10 +217,10 @@ jobs:
           # 暂存变更
           git add fpk-cloudreve/${{ steps.build_fpk.outputs.fpk_name }}
           
-          # 提交变更（无变更时不报错）
-          git commit -m "chore: 新增Cloudreve ${{ steps.remote_ver.outputs.remote_version }} fpk包" || echo "✅ 无需要提交的fpk变更"
+          # 提交变更（备注版本号）
+          git commit -m "chore: 更新Cloudreve ${{ steps.remote_ver.outputs.remote_version }} fpk包" || echo "✅ 无需要提交的fpk变更"
           
-          # 推送变更到FnDepot仓库main分支（可根据实际分支修改）
+          # 推送变更到FnDepot仓库main分支（根据实际分支修改）
           git push origin main
           echo "✅ fpk文件已推送到 https://github.com/moxyis/FnDepot/tree/main/fpk-cloudreve"
 
