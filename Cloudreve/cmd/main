@@ -5,15 +5,9 @@ PID_FILE="${TRIM_PKGVAR}/app.pid"
 
 CLOUDREVE_BIN="${TRIM_APPDEST}/bin/cloudreve" 
 DATA_DIR="/var/apps/${TRIM_APPNAME}/shares/${TRIM_APPNAME}/data/conf.ini"
-LICENSE_KEY="$cloudreve_key"
-# write the command to start your program here 
-BASE_CMD="${TRIM_APPDEST}/bin/cloudreve server -c ${DATA_DIR}"
-if [ -n "${LICENSE_KEY}" ]; then  # 判断 LICENSE_KEY 非空
-    CMD="${BASE_CMD} -l ${LICENSE_KEY}"
-else
-    CMD="${BASE_CMD}"
-fi
 
+# write the command to start your program here 
+CMD="${TRIM_APPDEST}/bin/cloudreve server -c ${DATA_DIR}"
 
 log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
