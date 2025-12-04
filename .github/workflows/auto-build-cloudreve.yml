@@ -3,7 +3,7 @@ name: 版本比对后自动打包Cloudreve并更新仓库
 on:
   workflow_dispatch:  # 手动触发
   schedule:
-    - cron: '25 16 * * *'  # 每日UTC 0点（北京时间8点）自动检测
+    - cron: '0 0 * * *'  
 
 jobs:
   build:
@@ -186,7 +186,7 @@ jobs:
           echo "fpk_file=/tmp/$FPK_FIXED_NAME" >> $GITHUB_OUTPUT
           echo "fpk_name=$FPK_FIXED_NAME" >> $GITHUB_OUTPUT
 
-      # ===================== 第四步：推送fpk到FnDepot仓库 =====================
+      # ===================== 第四步：推送fpk到FnDepot仓库 + 更新fnpack.json =====================
       - name: 12. 克隆FnDepot仓库（目标仓库）
         if: steps.compare.outputs.need_update == 'true'
         run: |
@@ -209,23 +209,42 @@ jobs:
           echo "✅ fpk文件已复制到：/tmp/FnDepot/fpk-cloudreve/${{ steps.build_fpk.outputs.fpk_name }}"
           ls -lh /tmp/FnDepot/fpk-cloudreve/
 
-      - name: 14. 提交并推送fpk文件到FnDepot仓库
+      - name: 14. 更新FnDepot仓库的fnpack.json中fpk-cloudreve的版本号
         if: steps.compare.outputs.need_update == 'true'
         run: |
           cd /tmp/FnDepot
           
-          # 暂存变更
-          git add fpk-cloudreve/${{ steps.build_fpk.outputs.fpk_name }}
+          # 检查fnpack.json是否存在，不存在则创建（基础结构）
+          if [ ! -f "fnpack.json" ]; then
+            echo '{"fpk-cloudreve": {"version": ""}}' > fnpack.json
+            echo "✅ 创建默认的fnpack.json文件"
+          fi
+          
+          # 使用jq工具更新版本号（核心：修改fpk-cloudreve对应的version）
+          # 若fnpack.json结构不同，需调整jq表达式（示例：{"fpk-cloudreve": {"version": "x.x.x"}}）
+          jq --arg ver "${{ steps.remote_ver.outputs.remote_version }}" \
+            '.["fpk-cloudreve"].version = $ver' fnpack.json > fnpack.tmp && mv fnpack.tmp fnpack.json
+          
+          echo "✅ fnpack.json更新完成，当前内容："
+          cat fnpack.json
+
+      - name: 15. 提交并推送fpk文件和fnpack.json到FnDepot仓库
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          cd /tmp/FnDepot
+          
+          # 暂存所有变更（fpk文件 + fnpack.json）
+          git add fpk-cloudreve/${{ steps.build_fpk.outputs.fpk_name }} fnpack.json
           
           # 提交变更（备注版本号）
-          git commit -m "chore: 更新Cloudreve ${{ steps.remote_ver.outputs.remote_version }} fpk包" || echo "✅ 无需要提交的fpk变更"
+          git commit -m "chore: 更新Cloudreve ${{ steps.remote_ver.outputs.remote_version }} fpk包及fnpack.json版本号" || echo "✅ 无需要提交的变更"
           
           # 推送变更到FnDepot仓库main分支（根据实际分支修改）
           git push origin main
-          echo "✅ fpk文件已推送到 https://github.com/moxyis/FnDepot/tree/main/fpk-cloudreve"
+          echo "✅ fpk文件和fnpack.json已推送到 https://github.com/moxyis/FnDepot/tree/main/fpk-cloudreve"
 
       # ===================== 可选：上传打包产物到Action Artifact =====================
-      # - name: 15. 上传打包产物
+      # - name: 16. 上传打包产物
       #   if: steps.compare.outputs.need_update == 'true'
       #   uses: actions/upload-artifact@v4
       #   with:
