@@ -269,7 +269,7 @@ jobs:
           git add fpk-cloudreve/${{ steps.build_fpk.outputs.fpk_name }} fnpack.json README.md
           
           # 提交变更（备注版本号+架构）
-          git commit -m "chore: 更新Cloudreve ${{ steps.remote_ver.outputs.remote_version }} (${{ steps.remote_ver.outputs.arch }}) fpk包、fnpack.json及README.md表格版本号" || echo "✅ 无需要提交的变更"
+          git commit -m "chore: 更新Cloudreve版本至${{ steps.remote_ver.outputs.remote_version }}" || echo "✅ 无需要提交的变更"
           
           # 推送变更到FnDepot仓库main分支（根据实际分支修改）
           git push origin main
