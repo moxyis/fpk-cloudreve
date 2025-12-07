@@ -245,7 +245,7 @@ jobs:
           
           # 检查README.md是否存在，不存在则创建基础文件（匹配你的表格格式）
           if [ ! -f "README.md" ]; then
-            echo "# FnDepot\n\n| **Cloudreve** | ${{ steps.remote_ver.outputs.remote_version }} | Cloudreve/https://cloudreve.org/ |\n\nCloudreve是通过Github-Actions进行每天自动化检测最新Cloudreve正式版本进行打包推送到本仓库，上方的应用清单的Cloudreve对应版本号暂时不会自动更新\n脚本自动化仓库：https://github.com/moxyis/fpk-cloudreve" > README.md
+            echo "# FnDepot\n\n| **Cloudreve** | ${{ steps.remote_ver.outputs.remote_version }} | Cloudreve/https://cloudreve.org/ ||\n\nCloudreve是通过Github-Actions进行每天自动化检测最新Cloudreve正式版本进行打包推送到本仓库，上方的应用清单的Cloudreve对应版本号暂时不会自动更新\n脚本自动化仓库：https://github.com/moxyis/fpk-cloudreve" > README.md
             echo "✅ 创建默认的README.md文件（匹配表格格式）"
           else
             # 精准匹配表格行：| **Cloudreve** | 版本号 | 链接 |
