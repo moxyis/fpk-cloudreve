@@ -2,7 +2,7 @@
 
 每天自动化检测最新Cloudreve正式版本进行打包推送到https://github.com/moxyis/FnDepot/
 
-
+已支持修改端口
 
 ## 支持与反馈
 
