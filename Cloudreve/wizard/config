@@ -1,0 +1,27 @@
+[
+  {
+    "stepTitle": "修改端口",
+    "items": [
+      {
+                "type": "tips",
+                "helpText": "修改端口后一定要记得修改 访问端口 ，不然飞牛桌面的图标入口无法打开新端口的页面！！！"
+            },
+      {
+        "type": "text",
+        "field": "app_port",
+        "label": "应用端口",
+        "initValue": "5212",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入端口号"
+          },
+          {
+            "pattern": "^[0-9]+$",
+            "message": "端口号必须是数字"
+          }
+        ]
+      }
+    ]
+  }
+]

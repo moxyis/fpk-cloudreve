@@ -2,64 +2,157 @@
 
 LOG_FILE="${TRIM_PKGVAR}/info.log"
 PID_FILE="${TRIM_PKGVAR}/app.pid"
-
 CLOUDREVE_BIN="${TRIM_APPDEST}/bin/cloudreve" 
-DATA_DIR="/var/apps/${TRIM_APPNAME}/shares/${TRIM_APPNAME}/data/conf.ini"
+# 设置默认端口为5212，若app_port有有效值则覆盖
+CLOUDREVE_PORT=${app_port:-5212}
+DATA_DIR="${TRIM_PKGVAR}/data"
+CFG_FILE="${TRIM_PKGVAR}/data/conf.ini"
+# 定义数据库文件路径（默认放在数据目录下）
+DB_FILE="${DATA_DIR}/cloudreve.db"
 
-# write the command to start your program here 
-CMD="${TRIM_APPDEST}/bin/cloudreve server -c ${DATA_DIR}"
+# 创建默认的conf.ini文件
+create_default_config() {
+    # 确保数据目录存在
+    mkdir -p "${DATA_DIR}"
+    
+    # 确定Listen端口值：基于已设置默认值的CLOUDREVE_PORT
+    # 严格校验端口格式，只保留数字部分
+    local listen_port=$(echo "${CLOUDREVE_PORT}" | tr -dc '0-9')
+    # 校验端口范围（1-65535），无效则回退到5212
+    if ! [[ "${listen_port}" =~ ^[1-9][0-9]{0,4}$ ]] || [ "${listen_port}" -gt 65535 ]; then
+        log_msg "端口 ${CLOUDREVE_PORT} 无效，使用默认端口 5212"
+        listen_port="5212"
+    fi
+    
+    # 写入默认配置：严格使用 :端口 格式，新增Database配置段
+    cat > "${CFG_FILE}" << EOF
+[System]
+Debug = false
+Mode = master
+Listen = :${listen_port}
+HashIDSalt = {HashIDSalt}
+
+[Database]
+Type = sqlite
+DBFile = ${DB_FILE}
+EOF
+    
+    # 设置配置文件为可读写权限
+    chmod 644 "${CFG_FILE}"
+    
+    log_msg "已创建默认配置文件: ${CFG_FILE}"
+    log_msg "配置文件权限已设置为644（所有者可读写）"
+    log_msg "默认配置使用占位符HashIDSalt: {HashIDSalt}"
+    log_msg "监听端口已设置为: :${listen_port}（严格:端口格式）"
+    log_msg "数据库配置已添加：SQLite，数据库文件路径 ${DB_FILE}"
+}
+
+# 修改配置文件中的Listen端口（强制:端口格式）
+update_listen_port() {
+    local new_port="$1"
+    # 过滤出纯数字端口（防止传入非法字符）
+    local clean_port=$(echo "${new_port}" | tr -dc '0-9')
+    
+    # 校验端口范围（1-65535）
+    if ! [[ "${clean_port}" =~ ^[1-9][0-9]{0,4}$ ]] || [ "${clean_port}" -gt 65535 ]; then
+        log_msg "传入的端口 ${new_port} 无效，跳过端口更新"
+        return 1
+    fi
+    
+    # 检查配置文件是否存在
+    if [ ! -f "${CFG_FILE}" ]; then
+        log_msg "配置文件未找到，先创建配置文件再更新端口"
+        create_default_config
+        return 0
+    fi
+    
+    # 强制修改为 :端口 格式（覆盖任何现有格式）
+    sed -i.bak "s/^Listen\s*=.*/Listen = :${clean_port}/" "${CFG_FILE}"
+    # 删除备份文件
+    rm -f "${CFG_FILE}.bak"
+    
+    log_msg "已将配置文件中的监听端口更新为: :${clean_port}（严格:端口格式）"
+}
+
+# 修正启动命令：指向具体的配置文件而不是目录
+CMD="${CLOUDREVE_BIN} server -c ${CFG_FILE}"
 
 log_msg() {
+    # 确保日志目录存在
+    mkdir -p "$(dirname "${LOG_FILE}")"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
 }
 
 start_process() {
+    # 检查配置文件是否存在，不存在则创建
+    if [ ! -f "${CFG_FILE}" ]; then
+        log_msg "未找到配置文件 ${CFG_FILE}，正在创建默认配置..."
+        create_default_config
+    else
+        # 确保现有配置文件有读写权限
+        if [ ! -w "${CFG_FILE}" ]; then
+            log_msg "修复配置文件权限（添加写入权限）..."
+            chmod u+rw "${CFG_FILE}"
+        fi
+        
+        # 如果端口值有效且不是默认占位符，更新配置文件中的Listen端口
+        if [ "${CLOUDREVE_PORT}" != "{app_port}" ]; then
+            log_msg "使用端口值: ${CLOUDREVE_PORT}，正在更新配置..."
+            update_listen_port "${CLOUDREVE_PORT}"
+        fi
+    fi
+
     if status; then
+        log_msg "进程已在运行中"
         return 0
     fi
 
-    log_msg "Starting process ..."
-    # run cmd to start process
+    log_msg "正在启动进程..."
+    # 启动进程并记录日志
     bash -c "${CMD}" >> ${LOG_FILE} 2>&1 &
-    # write pid to pidfile
+    # 写入PID到PID文件
     printf "%s" "$!" > ${PID_FILE}
-    # log_msg "CMD = ${CMD}"
-    # log_msg "pid = $!"
+    log_msg "启动命令 = ${CMD}"
+    log_msg "进程PID = $!"
     return 0
 }
 
 stop_process() {
-    log_msg "Stopping process ..."
+    log_msg "正在停止进程..."
 
     if [ -r "${PID_FILE}" ]; then
         pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
         
-        log_msg "pid=${pid}"
+        log_msg "进程PID=${pid}"
         if ! check_process "${pid}"; then
-            # process not exist, delete pidfile
+            # 进程不存在，删除PID文件
             rm -f "${PID_FILE}"
-            log_msg "remove pid file 1"
+            log_msg "删除PID文件（进程不存在）"
             return
         fi
 
-        log_msg "send TERM signal to PID:${pid}..."
+        log_msg "向PID:${pid}发送TERM终止信号..."
         kill -TERM ${pid} >> ${LOG_FILE} 2>&1
 
         local count=0
         while check_process "${pid}" && [ $count -lt 10 ]; do
             sleep 1
             count=$((count + 1))
-            log_msg "waiting process terminal... (${count}s/10s)"
+            log_msg "等待进程终止... (${count}秒/10秒)"
         done
 
         if check_process "${pid}"; then
-            log_msg "send KILL signal to PID:${pid}..."
+            log_msg "向PID:${pid}发送KILL强制终止信号..."
             kill -KILL "${pid}"
             sleep 1
             rm -f "${PID_FILE}"
+            log_msg "进程已被强制终止"
         else
-            log_msg "process killed... "
+            rm -f "${PID_FILE}"
+            log_msg "进程已正常终止"
         fi
+    else
+        log_msg "未找到PID文件，进程可能未运行"
     fi
 
     return 0
@@ -68,9 +161,9 @@ stop_process() {
 check_process() {
     local pid=$1
     if kill -0 "${pid}" 2>/dev/null; then
-        return 0  # process exist
+        return 0  # 进程存在
     else
-        return 1  # process not exist
+        return 1  # 进程不存在
     fi
 }
 
@@ -80,32 +173,41 @@ status() {
         if check_process "${pid}"; then
             return 0
         else
-            # Process is not running but pidfile exists - clean it up
+            # 进程未运行但PID文件存在，清理PID文件
             rm -f "${PID_FILE}"
+            log_msg "清理无效PID文件（进程 ${pid} 未运行）"
         fi    
     fi
 
     return 1
 }
 
+# 确保必要的目录存在
+mkdir -p "${TRIM_PKGVAR}"
+
 case $1 in
 start)
-    # run start command. exit 0 if success, exit 1 if failed
+    # 启动命令：成功退出0，失败退出1
     start_process
+    exit 0
     ;;
 stop)
-    # run stop command. exit 0 if success, exit 1 if failed
+    # 停止命令：成功退出0，失败退出1
     stop_process
+    exit 0
     ;;
 status)
-    # check application status command. exit 0 if running, exit 3 if not running
+    # 状态检查：运行中退出0，未运行退出3
     if status; then 
+        echo "Cloudreve 正在运行"
         exit 0
     else 
+        echo "Cloudreve 未运行"
         exit 3
     fi
     ;;
 *)
+    echo "使用方法: $0 {start|stop|status}"
     exit 1
     ;;
 esac
