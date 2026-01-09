@@ -231,23 +231,19 @@ jobs:
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
         run: echo "⚠️ 调试模式：跳过FPK文件复制"
 
-      # 步骤13：更新fnpack.json
+      # 步骤13：更新fnpack.json（核心修复：单行JSON，单引号包裹）
       - name: 13. 更新FnDepot的fnpack.json
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
         run: |
           cd /tmp/FnDepot
           REMOTE_VERSION="${{ steps.remote_ver.outputs.remote_version }}"
           
-          [ ! -f "fnpack.json" ] && echo '{
-  "fpk-cloudreve": {
-    "version": "",
-    "architectures": {
-      "x86": "",
-      "arm": ""
-    }
-  }
-}' > fnpack.json
+          # 核心修复：单行JSON，单引号包裹，避免YAML解析{}/换行冲突
+          if [ ! -f "fnpack.json" ]; then
+            echo '{"fpk-cloudreve":{"version":"","architectures":{"x86":"","arm":""}}}' > fnpack.json
+          fi
           
+          # 更新JSON内容（保持原有逻辑）
           jq --arg ver "$REMOTE_VERSION" \
              '.["fpk-cloudreve"].version = $ver 
              | .["fpk-cloudreve"].architectures.x86 = $ver 
