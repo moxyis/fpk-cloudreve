@@ -18,25 +18,29 @@ jobs:
       contents: write
       pull-requests: read
     steps:
+      # 步骤1：检出代码
       - name: 1. 检出仓库代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 2. 配置Git身份
+      # 步骤2：配置Git身份
+      - name: 2. 配置Git全局信息
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           echo "🔍 调试模式: ${{ github.event.inputs.debug_mode || 'false' }}"
           echo "debug_mode=${{ github.event.inputs.debug_mode || 'false' }}" >> $GITHUB_ENV
 
-      - name: 3. 安装基础依赖
+      # 步骤3：安装基础依赖
+      - name: 3. 安装jq/curl/sed依赖
         run: |
           sudo apt update && sudo apt install -y jq curl sed
           echo "✅ 基础依赖安装完成"
 
-      - name: 4. 读取本地manifest版本
+      # 步骤4：读取本地manifest版本
+      - name: 4. 读取本地版本号
         id: local_ver
         run: |
           MANIFEST_FILE="Cloudreve/manifest"
@@ -53,7 +57,8 @@ jobs:
         env:
           DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
 
-      - name: 5. 获取Cloudreve最新版本
+      # 步骤5：获取Cloudreve最新版本
+      - name: 5. 获取官方最新版本
         id: remote_ver
         run: |
           REMOTE_VERSION=$(curl -sSL --retry 3 --connect-timeout 10 \
@@ -70,6 +75,7 @@ jobs:
           echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
           echo "arch_mapping=Linux-AMD64:x86,Linux-ARM64:arm" >> $GITHUB_OUTPUT
 
+      # 步骤6：版本比对
       - name: 6. 版本比对判断是否更新
         id: compare
         run: |
@@ -81,7 +87,8 @@ jobs:
             echo "need_update=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: 7. 安装fnpack 1.2.0（Linux版）
+      # 步骤7：安装fnpack 1.2.0
+      - name: 7. 安装fnpack最新版
         if: steps.compare.outputs.need_update == 'true'
         run: |
           FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.2.0-linux-amd64"
@@ -95,7 +102,7 @@ jobs:
           echo "✅ fnpack 1.2.0 安装成功: $(which fnpack)"
           fnpack version
 
-      # 核心修改：移除EOF，用echo -e单行命令生成manifest，彻底规避格式冲突
+      # 步骤8：多架构打包（核心：无EOF，无缩进冲突）
       - name: 8. 多架构打包生成FPK
         if: steps.compare.outputs.need_update == 'true'
         id: build_multi_arch
@@ -142,7 +149,7 @@ jobs:
             chmod +x $ARCH_DIR/app/bin/cloudreve
             rm -rf /tmp/cloudreve_$ARCH_SHORT.tar.gz /tmp/cloudreve
             
-            # 关键修改：用echo -e单行命令生成manifest，无EOF，无格式冲突
+            # 单行生成manifest，无EOF冲突
             echo -e "version: $REMOTE_VERSION\nplatform: $PLATFORM_VAL" > $ARCH_DIR/manifest
             echo "✅ 生成manifest成功"
             cat $ARCH_DIR/manifest
@@ -169,6 +176,7 @@ jobs:
           echo "fndepot_fpk_paths=$FNDEPOT_FPK_PATHS" >> $GITHUB_OUTPUT
           echo "✅ 所有架构打包完成"
 
+      # 步骤9：更新本地manifest版本
       - name: 9. 更新本地manifest版本
         if: steps.compare.outputs.need_update == 'true'
         run: |
@@ -178,6 +186,7 @@ jobs:
           cat "$MANIFEST_FILE" | grep version
           git add "$MANIFEST_FILE"
 
+      # 步骤10：推送manifest
       - name: 10. 推送manifest到仓库
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
         run: |
@@ -185,20 +194,24 @@ jobs:
           git push origin HEAD:${{ github.ref_name }}
           echo "✅ manifest已推送"
 
+      # 步骤10.1：调试模式跳过推送
       - name: 10.1 调试模式-跳过manifest推送
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
         run: echo "⚠️ 调试模式：跳过manifest推送"
 
+      # 步骤11：克隆FnDepot仓库
       - name: 11. 克隆FnDepot仓库
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
         run: |
           git clone https://${{ secrets.FnDepot_PAT }}@github.com/moxyis/FnDepot.git /tmp/FnDepot
           echo "✅ FnDepot仓库克隆完成"
 
+      # 步骤11.1：调试模式跳过克隆
       - name: 11.1 调试模式-跳过FnDepot克隆
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
         run: echo "⚠️ 调试模式：跳过FnDepot克隆"
 
+      # 步骤12：复制FPK到FnDepot
       - name: 12. 复制FPK到FnDepot
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
         run: |
@@ -213,10 +226,12 @@ jobs:
             echo "✅ 复制$PLATFORM_VAL架构FPK完成"
           done
 
+      # 步骤12.1：调试模式跳过复制
       - name: 12.1 调试模式-跳过文件复制
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
         run: echo "⚠️ 调试模式：跳过FPK文件复制"
 
+      # 步骤13：更新fnpack.json
       - name: 13. 更新FnDepot的fnpack.json
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
         run: |
@@ -242,10 +257,12 @@ jobs:
           echo "✅ fnpack.json更新完成"
           cat fnpack.json
 
+      # 步骤13.1：调试模式跳过更新
       - name: 13.1 调试模式-跳过json更新
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
         run: echo "⚠️ 调试模式：跳过fnpack.json更新"
 
+      # 步骤14：更新README.md
       - name: 14. 更新FnDepot的README.md
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
         run: |
@@ -269,6 +286,12 @@ jobs:
           echo "✅ README.md更新完成"
           grep -A 2 -B 1 "Cloudreve" README.md
 
+      # 步骤14.1：调试模式跳过更新
+      - name: 14.1 调试模式-跳过README更新
+        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
+        run: echo "⚠️ 调试模式：跳过README.md更新"
+
+      # 步骤15：推送FnDepot变更
       - name: 15. 推送FnDepot变更
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
         run: |
@@ -278,10 +301,12 @@ jobs:
           git push origin main
           echo "✅ FnDepot变更已推送"
 
+      # 步骤15.1：调试模式跳过推送
       - name: 15.1 调试模式-跳过FnDepot推送
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
         run: echo "⚠️ 调试模式：跳过FnDepot推送"
 
+      # 步骤16：创建Release
       - name: 16. 创建Release并上传FPK
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
         uses: softprops/action-gh-release@v2
@@ -300,6 +325,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # 步骤16.1：调试模式跳过Release
       - name: 16.1 调试模式-跳过Release创建
         if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
         run: echo "⚠️ 调试模式：跳过Release创建，待上传文件：${{ steps.build_multi_arch.outputs.release_files }}"
