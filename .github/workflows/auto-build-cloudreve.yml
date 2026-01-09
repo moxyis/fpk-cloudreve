@@ -1,119 +1,321 @@
-name: 自动打包 Cloudreve（fnpack）
+name: 版本比对后自动打包Cloudreve并更新仓库
 
 on:
-  workflow_dispatch:
-    inputs:
-      debug_mode:
-        description: '调试模式（true=仅构建不推送）'
-        required: true
-        default: 'false'
-        type: boolean
+  workflow_dispatch:  # 手动触发
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *'  
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write  # 授予写入仓库/创建Release权限
+      pull-requests: read
+    strategy:
+      fail-fast: false  # 一个架构失败不影响另一个
+      matrix:
+        # 定义架构映射：AMD64→x86，ARM64→arm
+        arch_config:
+          - { arch: "Linux-AMD64", platform: "x86", asset_match: "linux_amd64.tar.gz" }
+          - { arch: "Linux-ARM64", platform: "arm", asset_match: "linux_arm64.tar.gz" }
 
     steps:
-      - name: Checkout
+      # ===================== 第一步：环境准备 =====================
+      - name: 1. 检出当前仓库代码（带完整历史）
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 完整检出历史
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 安装依赖
-        run: sudo apt update && sudo apt install -y jq curl
-
-      - name: 读取本地版本
-        id: local
+      - name: 2. 配置Git全局身份（跨仓库推送通用）
         run: |
-          if [ -f Cloudreve/manifest ]; then
-            v=$(sed -n 's/^version:[[:space:]]*//p' Cloudreve/manifest | sed 's/^v//')
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 3. 安装基础依赖（jq/curl/sed）
+        run: |
+          sudo apt update && sudo apt install -y jq curl sed
+          echo "基础依赖安装完成"
+
+      # ===================== 第二步：版本比对（核心前置） =====================
+      - name: 4. 读取本地manifest版本号
+        id: local_ver
+        run: |
+          MANIFEST_PATH="Cloudreve/${{ matrix.arch_config.platform }}/manifest"
+          if [ -f "$MANIFEST_PATH" ]; then
+            LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "$MANIFEST_PATH" \
+              | tr -d '"' | tr -d "'" | sed 's/^v//' | xargs)
+            echo "本地${{ matrix.arch_config.platform }}架构manifest版本：$LOCAL_VERSION"
+            echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
           else
-            v="0.0.0"
+            echo "❌ 未找到$MANIFEST_PATH，强制触发更新"
+            echo "local_version=0.0.0" >> $GITHUB_OUTPUT
+            mkdir -p "Cloudreve/${{ matrix.arch_config.platform }}"
+            echo "version: 0.0.0" > "$MANIFEST_PATH"
+            git add "$MANIFEST_PATH"
+            git commit -m "chore: 初始化${{ matrix.arch_config.platform }}架构manifest文件" || echo "无需要提交的变更"
           fi
-          echo "version=$v" >> $GITHUB_OUTPUT
 
-      - name: 获取 Cloudreve 最新版本
-        id: remote
+      - name: 5. 获取Cloudreve官方最新正式版版本号
+        id: remote_ver
         run: |
-          v=$(curl -s https://api.github.com/repos/cloudreve/Cloudreve/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-          [ -z "$v" -o "$v" = "null" ] && exit 1
-          echo "version=$v" >> $GITHUB_OUTPUT
+          REMOTE_VERSION=$(curl -sSL --retry 3 --connect-timeout 10 \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest" \
+            | jq -r '.tag_name' | sed 's/^v//' | xargs)
+          
+          if [ -z "$REMOTE_VERSION" ] || [ "$REMOTE_VERSION" = "null" ]; then
+            echo "❌ 获取远程版本失败"
+            exit 1
+          fi
+          
+          echo "远程最新版本：$REMOTE_VERSION"
+          echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
+          # 传递架构和platform参数
+          echo "arch=${{ matrix.arch_config.arch }}" >> $GITHUB_OUTPUT
+          echo "platform=${{ matrix.arch_config.platform }}" >> $GITHUB_OUTPUT
+          echo "asset_match=${{ matrix.arch_config.asset_match }}" >> $GITHUB_OUTPUT
 
-      - name: 判断是否需要构建
-        id: check
+      - name: 6. 版本比对，判断是否更新
+        id: compare
         run: |
-          if [ "${{ steps.local.outputs.version }}" = "${{ steps.remote.outputs.version }}" ]; then
-            echo "need=false" >> $GITHUB_OUTPUT
+          if [ "${{ steps.local_ver.outputs.local_version }}" = "${{ steps.remote_ver.outputs.remote_version }}" ]; then
+            echo "✅ ${{ matrix.arch_config.platform }}架构本地版本与远程版本一致（${{ steps.remote_ver.outputs.remote_version }}），无需更新"
+            echo "need_update=false" >> $GITHUB_OUTPUT
           else
-            echo "need=true" >> $GITHUB_OUTPUT
+            echo "🔄 ${{ matrix.arch_config.platform }}架构版本不一致，开始更新打包流程"
+            echo "need_update=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: 安装 fnpack
-        if: steps.check.outputs.need == 'true'
+      # ===================== 第三步：仅版本不一致时执行 =====================
+      - name: 7. 下载对应架构的Cloudreve安装包
+        if: steps.compare.outputs.need_update == 'true'
+        id: download_cloudreve
         run: |
-          curl -SL -o /usr/local/bin/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.0-linux-amd64
+          set -euo pipefail
+          
+          # 1. 获取完整发行版数据
+          RELEASE_DATA=$(curl -sSL --retry 3 --connect-timeout 10 \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest")
+          
+          # 2. 调试：输出所有资产名称
+          echo "📜 远程发行版所有资产名称："
+          echo "$RELEASE_DATA" | jq -r '.assets[].name'
+          
+          # 3. 匹配对应架构的安装包
+          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r \
+            '.assets[] | select(.name | contains("${{ steps.remote_ver.outputs.asset_match }}")) | .browser_download_url' | head -n1)
+          
+          # 4. 最终校验
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "❌ 未找到包含 '${{ steps.remote_ver.outputs.asset_match }}' 的资产"
+            exit 1
+          fi
+          
+          # 5. 提取匹配到的资产名
+          MATCHED_ASSET=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | contains("${{ steps.remote_ver.outputs.asset_match }}")) | .name' | head -n1)
+          echo "✅ 匹配到目标资产：$MATCHED_ASSET"
+          echo "✅ 下载链接：$DOWNLOAD_URL"
+          
+          # 6. 创建目录并下载
+          mkdir -p "Cloudreve/${{ steps.remote_ver.outputs.platform }}/app/bin"
+          curl -SL --retry 3 --connect-timeout 10 -o /tmp/cloudreve.tar.gz "$DOWNLOAD_URL"
+          
+          # 7. 解压并验证二进制文件
+          tar -zxf /tmp/cloudreve.tar.gz -C /tmp
+          if [ ! -f "/tmp/cloudreve" ]; then
+            echo "❌ 解压后未找到cloudreve二进制文件"
+            exit 1
+          fi
+          
+          # 8. 移动文件+添加执行权限
+          mv /tmp/cloudreve "Cloudreve/${{ steps.remote_ver.outputs.platform }}/app/bin/"
+          chmod +x "Cloudreve/${{ steps.remote_ver.outputs.platform }}/app/bin/cloudreve"
+          rm -rf /tmp/cloudreve.tar.gz /tmp/cloudreve
+          
+          # 9. 验证文件信息
+          echo "✅ 下载完成，文件信息："
+          ls -lh "Cloudreve/${{ steps.remote_ver.outputs.platform }}/app/bin/cloudreve"
+          file "Cloudreve/${{ steps.remote_ver.outputs.platform }}/app/bin/cloudreve"
+
+      - name: 8. 更新对应架构manifest的version字段
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          MANIFEST_PATH="Cloudreve/${{ steps.remote_ver.outputs.platform }}/manifest"
+          # 更新版本号
+          sed -i -E \
+            "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)([0-9a-zA-Z.]+)([\"']?)/\1\2${{ steps.remote_ver.outputs.remote_version }}\4/" \
+            "$MANIFEST_PATH"
+          
+          echo "✅ ${{ steps.remote_ver.outputs.platform }}架构manifest版本已更新为：${{ steps.remote_ver.outputs.remote_version }}"
+          cat "$MANIFEST_PATH" | grep -i version
+
+          # 暂存变更
+          git add "$MANIFEST_PATH"
+
+      - name: 9. 提交并推送manifest变更到当前仓库
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          git commit -m "chore: 更新${{ steps.remote_ver.outputs.platform }}架构Cloudreve版本至${{ steps.remote_ver.outputs.remote_version }}" || echo "✅ 无需要提交的manifest变更"
+          git push origin HEAD:${{ github.ref_name }}
+          echo "✅ ${{ steps.remote_ver.outputs.platform }}架构manifest版本号已推送到当前仓库"
+
+      - name: 10. 下载并安装fnpack（指定地址）
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.2.0-linux-amd64"
+          curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
           chmod +x /usr/local/bin/fnpack
+          
+          if ! command -v fnpack &>/dev/null; then
+            echo "❌ fnpack安装失败"
+            exit 1
+          fi
+          echo "✅ fnpack安装完成：$(which fnpack)"
 
-      - name: 构建 x86 / arm FPK
-        if: steps.check.outputs.need == 'true'
-        id: build
+      - name: 11. 进入对应架构目录执行fnpack打包（核心修改）
+        if: steps.compare.outputs.need_update == 'true'
+        id: build_fpk
         run: |
-          set -e
-          VERSION="${{ steps.remote.outputs.version }}"
-          RELEASE_FILES=""
+          # 进入对应架构的Cloudreve目录
+          cd "Cloudreve/${{ steps.remote_ver.outputs.platform }}"
+          echo "🚀 进入${{ steps.remote_ver.outputs.platform }}架构目录，执行打包命令：fnpack build"
+          fnpack build
+          
+          # 查找打包后的fpk文件
+          FPK_FILE=$(find . -name "*.fpk" -type f | head -n1)
+          if [ -z "$FPK_FILE" ]; then
+            echo "❌ 未找到打包后的fpk文件"
+            exit 1
+          fi
+          
+          # 拼接完整路径
+          FPK_FULL_PATH=$(pwd)/$FPK_FILE
+          # 带platform+版本号+架构的固定名称（推FnDepot）
+          FPK_FIXED_NAME="fpk-cloudreve-${{ steps.remote_ver.outputs.platform }}.fpk"
+          # 带版本号+架构+platform的名称（传Release）
+          FPK_VERSION_NAME="fpk-cloudreve-v${{ steps.remote_ver.outputs.remote_version }}-${{ steps.remote_ver.outputs.arch }}-${{ steps.remote_ver.outputs.platform }}.fpk"
+          
+          # 复制文件
+          mv "$FPK_FULL_PATH" /tmp/$FPK_FIXED_NAME
+          cp /tmp/$FPK_FIXED_NAME /tmp/$FPK_VERSION_NAME
+          
+          echo "✅ fnpack打包完成："
+          echo "  - 固定名称：/tmp/$FPK_FIXED_NAME"
+          echo "  - 版本+架构名称：/tmp/$FPK_VERSION_NAME"
+          echo "fpk_file=/tmp/$FPK_FIXED_NAME" >> $GITHUB_OUTPUT
+          echo "fpk_name=$FPK_FIXED_NAME" >> $GITHUB_OUTPUT
+          echo "fpk_release_file=/tmp/$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "fpk_release_name=$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
 
-          for ARCH in x86 arm; do
-            if [ "$ARCH" = "x86" ]; then
-              KEY="linux_amd64"
+      # ===================== 第四步：推送fpk到FnDepot仓库 + 更新fnpack.json + 更新README.md =====================
+      - name: 12. 克隆FnDepot仓库（目标仓库）
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          # 使用PAT令牌克隆（需在当前仓库Secrets配置 FnDepot_PAT）
+          git clone https://${{ secrets.FnDepot_PAT }}@github.com/moxyis/FnDepot.git /tmp/FnDepot
+          echo "✅ 成功克隆FnDepot仓库到/tmp/FnDepot"
+
+      - name: 13. 复制fpk文件到FnDepot仓库目标目录（覆盖旧文件）
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          # 创建目标文件夹（按platform区分）
+          mkdir -p /tmp/FnDepot/fpk-cloudreve/${{ steps.remote_ver.outputs.platform }}
+          
+          # 先删除旧的fpk文件
+          rm -f /tmp/FnDepot/fpk-cloudreve/${{ steps.remote_ver.outputs.platform }}/${{ steps.build_fpk.outputs.fpk_name }}
+          
+          # 复制新的fpk文件
+          cp ${{ steps.build_fpk.outputs.fpk_file }} /tmp/FnDepot/fpk-cloudreve/${{ steps.remote_ver.outputs.platform }}/
+          
+          echo "✅ fpk文件已复制到：/tmp/FnDepot/fpk-cloudreve/${{ steps.remote_ver.outputs.platform }}/${{ steps.build_fpk.outputs.fpk_name }}"
+          ls -lh /tmp/FnDepot/fpk-cloudreve/${{ steps.remote_ver.outputs.platform }}/
+
+      - name: 14. 更新FnDepot仓库的fnpack.json中对应platform的版本号
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          cd /tmp/FnDepot
+          
+          # 检查fnpack.json是否存在，不存在则创建
+          if [ ! -f "fnpack.json" ]; then
+            echo '{"fpk-cloudreve": {"x86": {"version": ""}, "arm": {"version": ""}}}' > fnpack.json
+            echo "✅ 创建默认的fnpack.json文件"
+          fi
+          
+          # 使用jq工具更新对应platform的版本号
+          jq --arg plat "${{ steps.remote_ver.outputs.platform }}" --arg ver "${{ steps.remote_ver.outputs.remote_version }}" \
+            '.["fpk-cloudreve"][$plat].version = $ver' fnpack.json > fnpack.tmp && mv fnpack.tmp fnpack.json
+          
+          echo "✅ fnpack.json更新完成，当前内容："
+          cat fnpack.json
+
+      - name: 15. 更新FnDepot仓库根目录README.md中对应架构的版本号
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          cd /tmp/FnDepot
+          
+          # 检查README.md是否存在，不存在则创建基础文件
+          if [ ! -f "README.md" ]; then
+            echo "# FnDepot\n\n| **Cloudreve** | x86 | arm | 链接 |\n|---------------|-----|-----|------|\n| 版本号        | ${{ steps.remote_ver.outputs.remote_version }} | ${{ steps.remote_ver.outputs.remote_version }} | Cloudreve/https://cloudreve.org/ |\n\nCloudreve是通过Github-Actions进行每天自动化检测最新Cloudreve正式版本进行打包推送到本仓库，上方的应用清单的Cloudreve对应版本号已按架构自动更新\n脚本自动化仓库：https://github.com/moxyis/fpk-cloudreve" > README.md
+            echo "✅ 创建默认的README.md文件（匹配多架构表格格式）"
+          else
+            # 区分x86/arm更新对应行的版本号
+            if [ "${{ steps.remote_ver.outputs.platform }}" = "x86" ]; then
+              sed -i -E \
+                "s/(\|\s*版本号\s*\|\s*)[0-9.]+\s*(\|\s*)[0-9.]+\s*(\|\s*Cloudreve\/https:\/\/cloudreve.org\/\s*\|)/\1${{ steps.remote_ver.outputs.remote_version }}\2\3\4/g" \
+                README.md
             else
-              KEY="linux_arm64"
+              sed -i -E \
+                "s/(\|\s*版本号\s*\|\s*)[0-9.]+\s*(\|\s*)[0-9.]+\s*(\|\s*Cloudreve\/https:\/\/cloudreve.org\/\s*\|)/\1\2${{ steps.remote_ver.outputs.remote_version }}\3\4/g" \
+                README.md
             fi
+              
+            echo "✅ README.md中${{ steps.remote_ver.outputs.platform }}架构版本已更新为：${{ steps.remote_ver.outputs.remote_version }}"
+          fi
+          
+          # 输出更新后的README.md关键内容
+          echo "📄 更新后的README.md关键内容："
+          grep -A 2 -B 1 "Cloudreve" README.md
 
-            URL=$(curl -s https://api.github.com/repos/cloudreve/Cloudreve/releases/latest \
-              | jq -r ".assets[] | select(.name | contains(\"$KEY.tar.gz\")) | .browser_download_url" | head -n1)
-
-            [ -z "$URL" ] && exit 1
-
-            WORKDIR="Cloudreve_$ARCH"
-            cp -r Cloudreve "$WORKDIR"
-
-            curl -L -o /tmp/cloudreve.tar.gz "$URL"
-            tar -zxf /tmp/cloudreve.tar.gz -C /tmp
-
-            mv /tmp/cloudreve "$WORKDIR/app/bin/cloudreve"
-            chmod +x "$WORKDIR/app/bin/cloudreve"
-
-            echo -e "version: $VERSION\nplatform: $ARCH" > "$WORKDIR/manifest"
-
-            cd "$WORKDIR"
-            fnpack build
-            FPK=$(ls *.fpk)
-            OUT="/tmp/fpk-cloudreve-v$VERSION-$ARCH.fpk"
-            mv "$FPK" "$OUT"
-            RELEASE_FILES="$RELEASE_FILES $OUT"
-            cd -
-          done
-
-          echo "files=$RELEASE_FILES" >> $GITHUB_OUTPUT
-
-      - name: 更新主 manifest
-        if: steps.check.outputs.need == 'true' && github.event.inputs.debug_mode != 'true'
+      - name: 16. 提交并推送所有变更到FnDepot仓库
+        if: steps.compare.outputs.need_update == 'true'
         run: |
-          sed -i -E "s/^version:.*/version: ${{ steps.remote.outputs.version }}/" Cloudreve/manifest
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git add Cloudreve/manifest
-          git commit -m "chore: update Cloudreve v${{ steps.remote.outputs.version }}" || true
-          git push
+          cd /tmp/FnDepot
+          
+          # 暂存所有变更
+          git add fpk-cloudreve/${{ steps.remote_ver.outputs.platform }}/${{ steps.build_fpk.outputs.fpk_name }} fnpack.json README.md
+          
+          # 提交变更
+          git commit -m "chore: 更新${{ steps.remote_ver.outputs.platform }}架构Cloudreve版本至${{ steps.remote_ver.outputs.remote_version }}" || echo "✅ 无需要提交的变更"
+          
+          # 推送变更到FnDepot仓库main分支
+          git push origin main
+          echo "✅ 所有变更已推送到 https://github.com/moxyis/FnDepot/tree/main/fpk-cloudreve/${{ steps.remote_ver.outputs.platform }}"
 
-      - name: 创建 Release
-        if: steps.check.outputs.need == 'true' && github.event.inputs.debug_mode != 'true'
+      # ===================== 新增：上传FPK到当前仓库的GitHub Releases =====================
+      - name: 17. 创建/更新GitHub Release并上传对应架构FPK文件
+        if: steps.compare.outputs.need_update == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: cloudreve-v${{ steps.remote.outputs.version }}
-          name: Cloudreve v${{ steps.remote.outputs.version }}
-          files: ${{ steps.build.outputs.files }}
+          # Release标签（统一版本+区分架构）
+          tag_name: "cloudreve-v${{ steps.remote_ver.outputs.remote_version }}"
+          # Release标题
+          name: "Cloudreve v${{ steps.remote_ver.outputs.remote_version }}"
+          # Release描述
+          body: |
+            ## Cloudreve 自动打包更新
+            - 版本：v${{ steps.remote_ver.outputs.remote_version }}
+            - 平台架构：${{ steps.remote_ver.outputs.arch }}（platform=${{ steps.remote_ver.outputs.platform }}）
+            - 打包格式：fpk
+            - 更新时间：${{ github.run_at }}
+            - 打包工具：fnpack 1.2.0
+            - FnDepot仓库：https://github.com/moxyis/FnDepot/tree/main/fpk-cloudreve/${{ steps.remote_ver.outputs.platform }}
+          # 是否为预发布
+          prerelease: false
+          # 上传对应架构的fpk文件
+          files: ${{ steps.build_fpk.outputs.fpk_release_file }}
+          # 覆盖同名标签（支持多架构文件上传）
+          overwrite: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
