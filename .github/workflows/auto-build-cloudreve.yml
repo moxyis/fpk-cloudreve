@@ -7,7 +7,7 @@ on:
 
 # 全局调试开关：true=调试（禁用推送），false=生产
 env:
-  DEBUG_MODE: "true"
+  DEBUG_MODE: "false"
 
 jobs:
   build-multi-arch:
