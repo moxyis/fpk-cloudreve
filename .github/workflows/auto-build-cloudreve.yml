@@ -194,9 +194,9 @@ jobs:
             
             # 5. 生成架构专属manifest（核心修复：EOF顶格，无缩进）
             cat > $ARCH_DIR/manifest << EOF
-version: $REMOTE_VERSION
-platform: $PLATFORM_VAL
-EOF
+            version: $REMOTE_VERSION
+            platform: $PLATFORM_VAL
+            EOF
             echo "✅ 生成 $ARCH_SHORT 架构专属manifest："
             cat $ARCH_DIR/manifest
             
@@ -306,14 +306,14 @@ EOF
           # 初始化fnpack.json（按架构分字段）
           if [ ! -f "fnpack.json" ]; then
             echo '{
-  "fpk-cloudreve": {
-    "version": "",
-    "architectures": {
-      "x86": "",
-      "arm": ""
-    }
-  }
-}' > fnpack.json
+              "fpk-cloudreve": {
+                "version": "",
+                "architectures": {
+                  "x86": "",
+                  "arm": ""
+                }
+              }
+            }' > fnpack.json
             echo "✅ 创建默认的fnpack.json文件（按架构分版本）"
           fi
           
@@ -341,14 +341,14 @@ EOF
           # 检查README.md是否存在，不存在则创建（含platform列）
           if [ ! -f "README.md" ]; then
             echo "# FnDepot
-| **应用** | **版本** | **x86平台** | **arm平台** | **链接** |
-|----------|----------|-------------|-------------|----------|
-| **Cloudreve** | $REMOTE_VERSION | ✅ 支持 | ✅ 支持 | Cloudreve/https://cloudreve.org/ |
+            | **应用** | **版本** | **x86平台** | **arm平台** | **链接** |
+            |----------|----------|-------------|-------------|----------|
+            | **Cloudreve** | $REMOTE_VERSION | ✅ 支持 | ✅ 支持 | Cloudreve/https://cloudreve.org/ |
 
-Cloudreve自动化打包说明：
-- 版本：v$REMOTE_VERSION
-- platform字段规则：x86=AMD64架构，arm=ARM64架构
-- 脚本自动化仓库：https://github.com/moxyis/fpk-cloudreve" > README.md
+            Cloudreve自动化打包说明：
+            - 版本：v$REMOTE_VERSION
+            - platform字段规则：x86=AMD64架构，arm=ARM64架构
+            - 脚本自动化仓库：https://github.com/moxyis/fpk-cloudreve" > README.md
             echo "✅ 创建默认的README.md文件（含platform列）"
           else
             # 精准更新版本号（platform支持状态固定）
