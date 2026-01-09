@@ -1,44 +1,43 @@
 name: 版本比对后自动打包Cloudreve并更新仓库
-
-on:
-  workflow_dispatch:  # 手动触发（新增调试参数）
+"on":
+  workflow_dispatch:
     inputs:
       debug_mode:
-        description: '是否开启调试模式（true=不推送，仅执行打包；false=正常推送）'
+        description: 是否开启调试模式（true=不推送，仅执行打包；false=正常推送）
         required: true
-        default: 'false'
+        default: "false"
         type: boolean
   schedule:
-    - cron: '0 0 * * *'  
-
+    - cron: 0 0 * * *
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 授予写入仓库/创建Release权限
+      contents: write
       pull-requests: read
     steps:
-      # ===================== 第一步：环境准备 =====================
       - name: 1. 检出当前仓库代码（带完整历史）
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 完整检出历史
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: 2. 配置Git全局身份（跨仓库推送通用）
-        run: |
+        run: >
           git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          # 输出调试模式状态
-          echo "🔍 调试模式：${{ github.event.inputs.debug_mode || 'false' }}"
-          echo "debug_mode=${{ github.event.inputs.debug_mode || 'false' }}" >> $GITHUB_ENV
 
+          git config --global user.email
+          "github-actions[bot]@users.noreply.github.com"
+
+          # 输出调试模式状态
+
+          echo "🔍 调试模式：${{ github.event.inputs.debug_mode || 'false' }}"
+
+          echo "debug_mode=${{ github.event.inputs.debug_mode || 'false' }}" >>
+          $GITHUB_ENV
       - name: 3. 安装基础依赖（jq/curl/sed）
         run: |
           sudo apt update && sudo apt install -y jq curl sed
           echo "基础依赖安装完成"
-
-      # ===================== 第二步：版本比对（核心前置） =====================
       - name: 4. 读取本地manifest版本号（仅版本，platform由各架构产物声明）
         id: local_ver
         run: |
@@ -65,7 +64,6 @@ jobs:
           fi
         env:
           DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
-
       - name: 5. 获取Cloudreve官方最新正式版版本号 + 架构映射
         id: remote_ver
         run: |
@@ -73,67 +71,79 @@ jobs:
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest" \
             | jq -r '.tag_name' | sed 's/^v//' | xargs)
-          
+
           if [ -z "$REMOTE_VERSION" ] || [ "$REMOTE_VERSION" = "null" ]; then
             echo "❌ 获取远程版本失败"
             exit 1
           fi
-          
+
           echo "远程最新版本：$REMOTE_VERSION"
           echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
           # 定义架构映射（官方架构 -> platform字段值），单值声明
           echo "arch_mapping=Linux-AMD64:x86,Linux-ARM64:arm" >> $GITHUB_OUTPUT
-
       - name: 6. 版本比对，判断是否更新
         id: compare
-        run: |
-          if [ "${{ steps.local_ver.outputs.local_version }}" = "${{ steps.remote_ver.outputs.remote_version }}" ]; then
+        run: >
+          if [ "${{ steps.local_ver.outputs.local_version }}" = "${{
+          steps.remote_ver.outputs.remote_version }}" ]; then
             echo "✅ 本地版本与远程版本一致（${{ steps.remote_ver.outputs.remote_version }}），无需更新"
             echo "need_update=false" >> $GITHUB_OUTPUT
-          否则
+          else
             echo "🔄 版本不一致，开始更新打包流程"
             echo "need_update=true" >> $GITHUB_OUTPUT
-          输入：
-
-      # ===================== 第三步：仅版本不一致时执行（多架构循环处理） =====================
+          fi
       - name: 7. 下载并安装fnpack（指定地址）
-        如果：步骤比较输出需要更新 == 'true'
-        运行： |
+        if: steps.compare.outputs.need_update == 'true'
+        run: >
           FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
-          curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
-          chomd +x /usr/local/bin/fnpack
-          
-          如果 ! command -v fnpack &> /dev/null; 那么
-            echo "❌ fnpack安装失败"
-            退出 1
-          输入：
-          echo "✅ fnpack安装完成：$(which fnpack)"
 
+          curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack
+          "$FNPACK_URL"
+
+          chmod +x /usr/local/bin/fnpack
+
+
+          if ! command -v fnpack &>/dev/null; then
+            echo "❌ fnpack安装失败"
+            exit 1
+          fi
+
+          echo "✅ fnpack安装完成：$(which fnpack)"
       - name: 8. 循环处理多架构打包（核心：每个架构设置独立platform字段）
-        如果：步骤比较输出需要更新 == 'true'
-        id： build_multi_arch
-        运行： |
-          设置 -euo pipefail
+        if: steps.compare.outputs.need_update == 'true'
+        id: build_multi_arch
+        run: >
+          set -euo pipefail
+
           # 解析架构映射（格式：官方架构:platform值,官方架构:platform值）
-          IFS=',' read -ra ARCH_MAP_LIST << "${{ steps.remote_ver.outputs.arch_mapping }}"
+
+          IFS=',' read -ra ARCH_MAP_LIST <<< "${{
+          steps.remote_ver.outputs.arch_mapping }}"
+
           REMOTE_VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-          
+
+
           # 初始化变量，存储所有打包后的文件路径（用于Release上传）
-          发布文件=""
+
+          RELEASE_FILES=""
+
           # 存储FnDepot需要的文件路径（按架构分目录）
+
           FNDEPOT_FPK_PATHS=""
 
+
           # 循环处理每个架构映射
-          对于 ARCH_MAP 在 "${ARCH_MAP_LIST[@]}"; do
+
+          for ARCH_MAP in "${ARCH_MAP_LIST[@]}"; do
             # 拆分官方架构和platform值
-            IFS=':' 读取 -r OFFICIAL_ARCH PLATFORM_VAL < <( $ARCH_MAP )
+            IFS=':' read -r OFFICIAL_ARCH PLATFORM_VAL <<< "$ARCH_MAP"
             echo "========================================"
             echo "🚀 开始处理架构：$OFFICIAL_ARCH -> platform=$PLATFORM_VAL"
             echo "========================================"
             
             # 架构关键词映射（用于下载官方包）
-            case $OFFICIAL_ARCH 在
-              Linux-AMD64
+            case $OFFICIAL_ARCH in
+              Linux-AMD64)
                 ARCH_KEY="linux_amd64"
                 ARCH_SHORT="amd64"
                 ;;
@@ -214,58 +224,81 @@ jobs:
             echo "✅ $OFFICIAL_ARCH 架构打包完成：$FPK_FULL_PATH（platform=$PLATFORM_VAL）"
             cd -
           done
-          
-          # 输出变量供后续步骤使用
-          echo "release_files=$RELEASE_FILES" >> $GITHUB_OUTPUT
-          echo "fndepot_fpk_paths=$FNDEPOT_FPK_PATHS" >> $GITHUB_OUTPUT
-          echo "✅ 所有架构打包完成，Release文件列表：$RELEASE_FILES"
 
+
+          # 输出变量供后续步骤使用
+
+          echo "release_files=$RELEASE_FILES" >> $GITHUB_OUTPUT
+
+          echo "fndepot_fpk_paths=$FNDEPOT_FPK_PATHS" >> $GITHUB_OUTPUT
+
+          echo "✅ 所有架构打包完成，Release文件列表：$RELEASE_FILES"
       - name: 9. 更新主manifest的版本字段
         if: steps.compare.outputs.need_update == 'true'
-        run: |
+        run: >
           MANIFEST_FILE="Cloudreve/manifest"
+
           # 仅更新版本号（platform由各架构产物的manifest声明）
+
           sed -i -E \
             "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)([0-9a-zA-Z.]+)([\"']?)/\1\2${{ steps.remote_ver.outputs.remote_version }}\4/" \
             "$MANIFEST_FILE"
-          
-          echo "✅ 主manifest版本已更新为：${{ steps.remote_ver.outputs.remote_version }}"
+
+          echo "✅ 主manifest版本已更新为：${{ steps.remote_ver.outputs.remote_version
+          }}"
+
           cat "$MANIFEST_FILE" | grep -i version
 
+
           # 暂存变更（调试模式仅暂存，不提交）
+
           git add "$MANIFEST_FILE"
-
       - name: 10. 提交并推送manifest变更到当前仓库（调试模式跳过）
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
-        run: |
-          git commit -m "chore: 更新Cloudreve版本至${{ steps.remote_ver.outputs.remote_version }}" || echo "✅ 无需要提交的manifest变更"
-          git push origin HEAD:${{ github.ref_name }}
-          echo "✅ 主manifest版本号已推送到当前仓库"
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode != 'true'
+        run: >
+          git commit -m "chore: 更新Cloudreve版本至${{
+          steps.remote_ver.outputs.remote_version }}" || echo "✅
+          无需要提交的manifest变更"
 
+          git push origin HEAD:${{ github.ref_name }}
+
+          echo "✅ 主manifest版本号已推送到当前仓库"
       - name: 10.1 调试模式：跳过manifest推送
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode == 'true'
         run: |
           echo "⚠️ 调试模式：跳过manifest提交和推送"
-
-      # ===================== 第四步：推送多架构fpk到FnDepot仓库（调试模式跳过） =====================
       - name: 11. 克隆FnDepot仓库（目标仓库，调试模式跳过）
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
-        run: |
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode != 'true'
+        run: >
           # 使用PAT令牌克隆（需在当前仓库Secrets配置 FnDepot_PAT）
-          git clone https://${{ secrets.FnDepot_PAT }}@github.com/moxyis/FnDepot.git /tmp/FnDepot
-          echo "✅ 成功克隆FnDepot仓库到/tmp/FnDepot"
 
+          git clone https://${{ secrets.FnDepot_PAT
+          }}@github.com/moxyis/FnDepot.git /tmp/FnDepot
+
+          echo "✅ 成功克隆FnDepot仓库到/tmp/FnDepot"
       - name: 11.1 调试模式：跳过FnDepot克隆
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode == 'true'
         run: |
           echo "⚠️ 调试模式：跳过FnDepot仓库克隆"
-
       - name: 12. 复制多架构fpk文件到FnDepot（按platform分目录，调试模式跳过）
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
-        run: |
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode != 'true'
+        run: >
           # 解析FnDepot文件路径映射（格式：文件路径:platform值,文件路径:platform值）
-          IFS=' ' read -ra FPK_PATH_LIST <<< "${{ steps.build_multi_arch.outputs.fndepot_fpk_paths }}"
-          
+
+          IFS=' ' read -ra FPK_PATH_LIST <<< "${{
+          steps.build_multi_arch.outputs.fndepot_fpk_paths }}"
+
+
           for FPK_PATH_MAP in "${FPK_PATH_LIST[@]}"; do
             if [ -z "$FPK_PATH_MAP" ]; then continue; fi
             # 拆分文件路径和platform值
@@ -280,21 +313,24 @@ jobs:
             echo "✅ 复制 $PLATFORM_VAL 架构fpk到：$FNDIR/fpk-cloudreve.fpk"
             ls -lh "$FNDIR/"
           done
-
       - name: 12.1 调试模式：跳过FnDepot文件复制
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
-        run: |
-          echo "⚠️ 调试模式：跳过FnDepot文件复制，待复制文件列表：${{ steps.build_multi_arch.outputs.fndepot_fpk_paths }}"
-
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode == 'true'
+        run: >
+          echo "⚠️ 调试模式：跳过FnDepot文件复制，待复制文件列表：${{
+          steps.build_multi_arch.outputs.fndepot_fpk_paths }}"
       - name: 13. 更新FnDepot仓库的fnpack.json（调试模式跳过）
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode != 'true'
         run: |
           cd /tmp/FnDepot
           REMOTE_VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-          
+
           # 初始化fnpack.json（按架构分字段）
           if [ ! -f "fnpack.json" ]; then
-                      echo '{
+            echo '{
             "fpk-cloudreve": {
               "version": "",
               "architectures": {
@@ -305,108 +341,127 @@ jobs:
           }' > fnpack.json
             echo "✅ 创建默认的fnpack.json文件（按架构分版本）"
           fi
-          
+
           # 更新整体版本和各架构版本
           jq --arg ver "$REMOTE_VERSION" \
              '.["fpk-cloudreve"].version = $ver 
              | .["fpk-cloudreve"].architectures.x86 = $ver 
              | .["fpk-cloudreve"].architectures.arm = $ver' \
              fnpack.json > fnpack.tmp && mv fnpack.tmp fnpack.json
-          
+
           echo "✅ fnpack.json更新完成，当前内容："
           cat fnpack.json
-
       - name: 13.1 调试模式：跳过FnDepot的fnpack.json更新
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
-        run: |
-          echo "⚠️ 调试模式：跳过FnDepot的fnpack.json更新，目标版本：${{ steps.remote_ver.outputs.remote_version }}"
-
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode == 'true'
+        run: >
+          echo "⚠️ 调试模式：跳过FnDepot的fnpack.json更新，目标版本：${{
+          steps.remote_ver.outputs.remote_version }}"
       - name: 14. 更新FnDepot仓库README.md（调试模式跳过）
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode != 'true'
         run: |
           cd /tmp/FnDepot
           REMOTE_VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-          
+
           # 检查README.md是否存在，不存在则创建（含platform列）
           if [ ! -f "README.md" ]; then
             echo "# FnDepot
             | **应用** | **版本** | **x86平台** | **arm平台** | **链接** |
             |----------|----------|-------------|-------------|----------|
             | **Cloudreve** | $REMOTE_VERSION | ✅ 支持 | ✅ 支持 | Cloudreve/https://cloudreve.org/ |
-            
+
             Cloudreve自动化打包说明：
             - 版本：v$REMOTE_VERSION
             - platform字段规则：x86=AMD64架构，arm=ARM64架构
             - 脚本自动化仓库：https://github.com/moxyis/fpk-cloudreve" > README.md
-                        echo "✅ 创建默认的README.md文件（含platform列）"
-                      else
-                        # 精准更新版本号（platform支持状态固定）
-                        sed -i -E \
-                          "s/(\|\s*\*\*Cloudreve\*\*\s*\|\s*)[0-9.]+\s*(\|\s*✅ 支持\s*\|\s*✅ 支持\s*\|\s*Cloudreve\/https:\/\/cloudreve.org\/\s*\|)/\1$REMOTE_VERSION\2/g" \
-                          README.md
-                          
+            echo "✅ 创建默认的README.md文件（含platform列）"
+          else
+            # 精准更新版本号（platform支持状态固定）
+            sed -i -E \
+              "s/(\|\s*\*\*Cloudreve\*\*\s*\|\s*)[0-9.]+\s*(\|\s*✅ 支持\s*\|\s*✅ 支持\s*\|\s*Cloudreve\/https:\/\/cloudreve.org\/\s*\|)/\1$REMOTE_VERSION\2/g" \
+              README.md
+              
             echo "✅ README.md中Cloudreve版本已更新为：$REMOTE_VERSION"
           fi
-          
+
           # 输出更新后的README.md关键内容
           echo "📄 更新后的README.md关键内容："
           grep -A 2 -B 1 "Cloudreve" README.md
-
       - name: 14.1 调试模式：跳过FnDepot的README.md更新
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
-        run: |
-          echo "⚠️ 调试模式：跳过FnDepot的README.md更新，目标版本：${{ steps.remote_ver.outputs.remote_version }}"
-
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode == 'true'
+        run: >
+          echo "⚠️ 调试模式：跳过FnDepot的README.md更新，目标版本：${{
+          steps.remote_ver.outputs.remote_version }}"
       - name: 15. 提交并推送所有变更到FnDepot仓库（调试模式跳过）
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
-        run: |
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode != 'true'
+        run: >
           cd /tmp/FnDepot
-          
-          # 暂存所有变更（多架构fpk文件 + fnpack.json + README.md）
-          git add fpk-cloudreve/ fnpack.json README.md
-          
-          # 提交变更（备注版本+platform映射）
-          git commit -m "chore: 更新Cloudreve版本至${{ steps.remote_ver.outputs.remote_version }}（platform：x86=AMD64，arm=ARM64）" || echo "✅ 无需要提交的变更"
-          
-          # 推送变更到FnDepot仓库main分支
-          git push origin main
-          echo "✅ 所有变更已推送到 https://github.com/moxyis/FnDepot/tree/main/fpk-cloudreve"
 
+
+          # 暂存所有变更（多架构fpk文件 + fnpack.json + README.md）
+
+          git add fpk-cloudreve/ fnpack.json README.md
+
+
+          # 提交变更（备注版本+platform映射）
+
+          git commit -m "chore: 更新Cloudreve版本至${{
+          steps.remote_ver.outputs.remote_version
+          }}（platform：x86=AMD64，arm=ARM64）" || echo "✅ 无需要提交的变更"
+
+
+          # 推送变更到FnDepot仓库main分支
+
+          git push origin main
+
+          echo "✅ 所有变更已推送到
+          https://github.com/moxyis/FnDepot/tree/main/fpk-cloudreve"
       - name: 15.1 调试模式：跳过FnDepot提交和推送
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode == 'true'
         run: |
           echo "⚠️ 调试模式：跳过FnDepot仓库的提交和推送"
-
-      # ===================== 上传多架构FPK到GitHub Releases（调试模式跳过） =====================
       - name: 16. 创建GitHub Release并上传多架构FPK文件（调试模式跳过）
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode != 'true'
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode != 'true'
         uses: softprops/action-gh-release@v2
         with:
-          # Release标签（带版本号）
-          tag_name: "cloudreve-v${{ steps.remote_ver.outputs.remote_version }}"
-          # Release标题（带版本号）
-          name: "Cloudreve v${{ steps.remote_ver.outputs.remote_version }}"
-          # Release描述（明确platform映射）
-          body: |
+          tag_name: cloudreve-v${{ steps.remote_ver.outputs.remote_version }}
+          name: Cloudreve v${{ steps.remote_ver.outputs.remote_version }}
+          body: >
             ## Cloudreve 自动打包更新
+
             - 版本：v${{ steps.remote_ver.outputs.remote_version }}
+
             - platform字段映射：
               - x86 → Linux-AMD64 架构
               - arm → Linux-ARM64 架构
             - 打包格式：fpk
+
             - 更新时间：${{ github.run_at }}
+
             - 打包工具：fnpack 1.0.4
-            - FnDepot仓库：https://github.com/moxyis/FnDepot/tree/main/fpk-cloudreve
-          # 是否为预发布
+
+            -
+            FnDepot仓库：https://github.com/moxyis/FnDepot/tree/main/fpk-cloudreve
           prerelease: false
-          # 上传所有架构的fpk文件
           files: ${{ steps.build_multi_arch.outputs.release_files }}
-          # 覆盖同名标签
           overwrite: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: 16.1 调试模式：跳过GitHub Release创建
-        if: steps.compare.outputs.need_update == 'true' && github.event.inputs.debug_mode == 'true'
-        run: |
-          echo "⚠️ 调试模式：跳过GitHub Release创建，待上传文件列表：${{ steps.build_multi_arch.outputs.release_files }}"
+        if: >-
+          steps.compare.outputs.need_update == 'true' &&
+          github.event.inputs.debug_mode == 'true'
+        run: >
+          echo "⚠️ 调试模式：跳过GitHub Release创建，待上传文件列表：${{
+          steps.build_multi_arch.outputs.release_files }}"
