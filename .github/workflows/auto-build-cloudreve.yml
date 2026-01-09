@@ -86,7 +86,7 @@ jobs:
         run: |
           curl -SL -o /usr/local/bin/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.0-linux-amd64
           chmod +x /usr/local/bin/fnpack
-          fnpack version
+          fnpack
 
       # 8. 多架构打包
       - name: 8. 多架构打包
