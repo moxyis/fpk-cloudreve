@@ -1,10 +1,10 @@
-name: 自动打包Cloudreve并同步更新
+name: 自动打包 Cloudreve（fnpack）
 
 on:
   workflow_dispatch:
     inputs:
       debug_mode:
-        description: '调试模式（true=仅打包不推送）'
+        description: '调试模式（true=仅构建不推送）'
         required: true
         default: 'false'
         type: boolean
@@ -18,142 +18,114 @@ jobs:
       contents: write
 
     steps:
-      # 1. 检出代码
-      - name: 1. 检出仓库代码
-        uses: actions/checkout@v4
+      # 1. 拉代码
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 2. Git & DEBUG_MODE 统一处理（核心修复）
-      - name: 2. 配置Git与DEBUG_MODE
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      # 2. 基础工具
+      - name: 安装依赖
+        run: sudo apt update && sudo apt install -y jq curl
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "DEBUG_MODE=${{ github.event.inputs.debug_mode }}" >> $GITHUB_ENV
+      # 3. 读取本地版本
+      - name: 读取本地 manifest 版本
+        id: local
+        run: |
+          if [ -f Cloudreve/manifest ]; then
+            v=$(sed -n 's/^version:[[:space:]]*//p' Cloudreve/manifest | sed 's/^v//')
           else
-            echo "DEBUG_MODE=false" >> $GITHUB_ENV
+            v="0.0.0"
+          fi
+          echo "version=$v" >> $GITHUB_OUTPUT
+
+      # 4. 获取官方最新版本
+      - name: 获取 Cloudreve 最新版本
+        id: remote
+        run: |
+          v=$(curl -s https://api.github.com/repos/cloudreve/Cloudreve/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          [ -z "$v" -o "$v" = "null" ] && exit 1
+          echo "version=$v" >> $GITHUB_OUTPUT
+
+      # 5. 是否需要更新
+      - name: 判断是否需要构建
+        id: check
+        run: |
+          if [ "${{ steps.local.outputs.version }}" = "${{ steps.remote.outputs.version }}" ]; then
+            echo "need=false" >> $GITHUB_OUTPUT
+          else
+            echo "need=true" >> $GITHUB_OUTPUT
           fi
 
-          echo "DEBUG_MODE=$DEBUG_MODE"
-
-      # 3. 基础依赖
-      - name: 3. 安装依赖
-        run: sudo apt update && sudo apt install -y jq curl sed
-
-      # 4. 本地版本
-      - name: 4. 读取本地版本
-        id: local_ver
-        run: |
-          MANIFEST="Cloudreve/manifest"
-          mkdir -p Cloudreve
-          if [ -f "$MANIFEST" ]; then
-            VER=$(sed -n 's/^version[[:space:]]*:[[:space:]]*//p' "$MANIFEST" | tr -d '"' | sed 's/^v//' | xargs)
-          else
-            VER="0.0.0"
-            echo "version: 0.0.0" > "$MANIFEST"
-          fi
-          echo "local_version=$VER" >> $GITHUB_OUTPUT
-          echo "本地版本: $VER"
-
-      # 5. 获取官方最新版本（一次性）
-      - name: 5. 获取Cloudreve最新版本
-        id: remote_ver
-        run: |
-          DATA=$(curl -sSL https://api.github.com/repos/cloudreve/Cloudreve/releases/latest)
-          VER=$(echo "$DATA" | jq -r '.tag_name' | sed 's/^v//')
-          [ -z "$VER" -o "$VER" = "null" ] && exit 1
-          echo "remote_version=$VER" >> $GITHUB_OUTPUT
-          echo "release_json<<EOF" >> $GITHUB_OUTPUT
-          echo "$DATA" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "arch_mapping=Linux-AMD64:x86,Linux-ARM64:arm" >> $GITHUB_OUTPUT
-
-      # 6. 比较版本
-      - name: 6. 判断是否更新
-        id: compare
-        run: |
-          if [ "${{ steps.local_ver.outputs.local_version }}" = "${{ steps.remote_ver.outputs.remote_version }}" ]; then
-            echo "need_update=false" >> $GITHUB_OUTPUT
-          else
-            echo "need_update=true" >> $GITHUB_OUTPUT
-          fi
-
-      # 7. 安装 fnpack
-      - name: 7. 安装fnpack
-        if: steps.compare.outputs.need_update == 'true'
+      # 6. 安装 fnpack
+      - name: 安装 fnpack
+        if: steps.check.outputs.need == 'true'
         run: |
           curl -SL -o /usr/local/bin/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.0-linux-amd64
           chmod +x /usr/local/bin/fnpack
-          fnpack
 
-      # 8. 多架构打包
-      - name: 8. 多架构打包
-        if: steps.compare.outputs.need_update == 'true'
+      # 7. 多架构打包（核心）
+      - name: 构建 x86 / arm FPK
+        if: steps.check.outputs.need == 'true'
         id: build
         run: |
           set -e
-          RELEASE_DATA='${{ steps.remote_ver.outputs.release_json }}'
-          VERSION='${{ steps.remote_ver.outputs.remote_version }}'
-          MAP='${{ steps.remote_ver.outputs.arch_mapping }}'
+          VERSION="${{ steps.remote.outputs.version }}"
+          RELEASE_FILES=""
 
-          FILES=""
-          DEPOT=""
-
-          IFS=',' read -ra LIST <<< "$MAP"
-          for I in "${LIST[@]}"; do
-            IFS=':' read -r OFF PLAT <<< "$I"
-            case $OFF in
-              Linux-AMD64) KEY=linux_amd64; SHORT=amd64 ;;
-              Linux-ARM64) KEY=linux_arm64; SHORT=arm64 ;;
+          for ARCH in x86 arm; do
+            case "$ARCH" in
+              x86) KEY="linux_amd64" ;;
+              arm) KEY="linux_arm64" ;;
             esac
 
-            URL=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name|contains(\"$KEY.tar.gz\")) | .browser_download_url" | head -n1)
-            mkdir -p Cloudreve_$SHORT/app/bin
-            curl -L -o /tmp/cv.tar.gz "$URL"
-            tar -zxf /tmp/cv.tar.gz -C /tmp
-            mv /tmp/cloudreve Cloudreve_$SHORT/app/bin/
-            chmod +x Cloudreve_$SHORT/app/bin/cloudreve
+            URL=$(curl -s https://api.github.com/repos/cloudreve/Cloudreve/releases/latest \
+              | jq -r ".assets[] | select(.name | contains(\"$KEY.tar.gz\")) | .browser_download_url" | head -n1)
 
-            echo -e "version: $VERSION\nplatform: $PLAT" > Cloudreve_$SHORT/manifest
-            cd Cloudreve_$SHORT
+            [ -z "$URL" ] && exit 1
+
+            WORKDIR="Cloudreve_$ARCH"
+            cp -r Cloudreve "$WORKDIR"
+
+            curl -L -o /tmp/cloudreve.tar.gz "$URL"
+            tar -zxf /tmp/cloudreve.tar.gz -C /tmp
+
+            mv /tmp/cloudreve "$WORKDIR/app/bin/cloudreve"
+            chmod +x "$WORKDIR/app/bin/cloudreve"
+
+            cat > "$WORKDIR/manifest" <<EOF
+version: $VERSION
+platform: $ARCH
+EOF
+
+            cd "$WORKDIR"
             fnpack build
             FPK=$(ls *.fpk)
-            mv "$FPK" "/tmp/fpk-cloudreve-v$VERSION-$PLAT.fpk"
+            OUT="/tmp/fpk-cloudreve-v$VERSION-$ARCH.fpk"
+            mv "$FPK" "$OUT"
+            RELEASE_FILES+="$OUT "
             cd -
-
-            FILES+="/tmp/fpk-cloudreve-v$VERSION-$PLAT.fpk "
-            DEPOT+="/tmp/fpk-cloudreve-v$VERSION-$PLAT.fpk:$PLAT "
           done
 
-          echo "release_files=$FILES" >> $GITHUB_OUTPUT
-          echo "fndepot_fpk_paths=$DEPOT" >> $GITHUB_OUTPUT
+          echo "files=$RELEASE_FILES" >> $GITHUB_OUTPUT
 
-      # 9. 更新主 manifest
-      - name: 9. 更新manifest
-        if: steps.compare.outputs.need_update == 'true'
+      # 8. 更新主仓库 manifest
+      - name: 更新主 manifest
+        if: steps.check.outputs.need == 'true' && github.event.inputs.debug_mode != 'true'
         run: |
-          FILE=Cloudreve/manifest
-          if grep -q "^version" "$FILE"; then
-            sed -i "s/^version.*/version: ${{ steps.remote_ver.outputs.remote_version }}/" "$FILE"
-          else
-            echo "version: ${{ steps.remote_ver.outputs.remote_version }}" >> "$FILE"
-          fi
-          git add "$FILE"
-
-      # 10. 推送主仓库
-      - name: 10. 推送主仓库
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE != 'true'
-        run: |
-          git commit -m "chore: 更新Cloudreve至v${{ steps.remote_ver.outputs.remote_version }}" || true
+          sed -i -E "s/^version:.*/version: ${{ steps.remote.outputs.version }}/" Cloudreve/manifest
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add Cloudreve/manifest
+          git commit -m "chore: update Cloudreve v${{ steps.remote.outputs.version }}" || true
           git push
 
-      # 11. Release
-      - name: 11. 创建Release
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE != 'true'
+      # 9. 创建 Release
+      - name: 创建 GitHub Release
+        if: steps.check.outputs.need == 'true' && github.event.inputs.debug_mode != 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: cloudreve-v${{ steps.remote_ver.outputs.remote_version }}
-          name: Cloudreve v${{ steps.remote_ver.outputs.remote_version }}
-          files: ${{ steps.build.outputs.release_files }}
+          tag_name: cloudreve-v${{ steps.remote.outputs.version }}
+          name: Cloudreve v${{ steps.remote.outputs.version }}
+          files: ${{ steps.build.outputs.files }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
