@@ -3,10 +3,6 @@
     "stepTitle": "修改端口",
     "items": [
       {
-                "type": "tips",
-                "helpText": "修改端口后一定要记得修改 访问端口 ，不然飞牛桌面的图标入口无法打开新端口的页面！！！"
-            },
-      {
         "type": "text",
         "field": "app_port",
         "label": "应用端口",

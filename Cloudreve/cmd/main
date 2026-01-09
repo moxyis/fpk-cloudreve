@@ -96,7 +96,7 @@ start_process() {
         fi
         
         # 如果端口值有效且不是默认占位符，更新配置文件中的Listen端口
-        if [ "${CLOUDREVE_PORT}" != "{app_port}" ]; then
+        if [ "${CLOUDREVE_PORT}" != "{wizard_port}" ]; then
             log_msg "使用端口值: ${CLOUDREVE_PORT}，正在更新配置..."
             update_listen_port "${CLOUDREVE_PORT}"
         fi
