@@ -183,9 +183,9 @@ jobs:
             
             # 5. 生成架构专属manifest（核心：添加platform字段，单值声明）
             cat > $ARCH_DIR/manifest << EOF
-version: $REMOTE_VERSION
-platform: $PLATFORM_VAL
-EOF
+            version: $REMOTE_VERSION
+            platform: $PLATFORM_VAL
+            EOF
             echo "✅ 生成 $ARCH_SHORT 架构专属manifest："
             cat $ARCH_DIR/manifest
             
