@@ -90,50 +90,50 @@ jobs:
           if [ "${{ steps.local_ver.outputs.local_version }}" = "${{ steps.remote_ver.outputs.remote_version }}" ]; then
             echo "✅ 本地版本与远程版本一致（${{ steps.remote_ver.outputs.remote_version }}），无需更新"
             echo "need_update=false" >> $GITHUB_OUTPUT
-          else
+          否则
             echo "🔄 版本不一致，开始更新打包流程"
             echo "need_update=true" >> $GITHUB_OUTPUT
-          fi
+          输入：
 
       # ===================== 第三步：仅版本不一致时执行（多架构循环处理） =====================
       - name: 7. 下载并安装fnpack（指定地址）
-        if: steps.compare.outputs.need_update == 'true'
-        run: |
+        如果：步骤比较输出需要更新 == 'true'
+        运行： |
           FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
           curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
-          chmod +x /usr/local/bin/fnpack
+          chomd +x /usr/local/bin/fnpack
           
-          if ! command -v fnpack &>/dev/null; then
+          如果 ! command -v fnpack &> /dev/null; 那么
             echo "❌ fnpack安装失败"
-            exit 1
-          fi
+            退出 1
+          输入：
           echo "✅ fnpack安装完成：$(which fnpack)"
 
       - name: 8. 循环处理多架构打包（核心：每个架构设置独立platform字段）
-        if: steps.compare.outputs.need_update == 'true'
-        id: build_multi_arch
-        run: |
-          set -euo pipefail
+        如果：步骤比较输出需要更新 == 'true'
+        id： build_multi_arch
+        运行： |
+          设置 -euo pipefail
           # 解析架构映射（格式：官方架构:platform值,官方架构:platform值）
-          IFS=',' read -ra ARCH_MAP_LIST <<< "${{ steps.remote_ver.outputs.arch_mapping }}"
+          IFS=',' read -ra ARCH_MAP_LIST << "${{ steps.remote_ver.outputs.arch_mapping }}"
           REMOTE_VERSION="${{ steps.remote_ver.outputs.remote_version }}"
           
           # 初始化变量，存储所有打包后的文件路径（用于Release上传）
-          RELEASE_FILES=""
+          发布文件=""
           # 存储FnDepot需要的文件路径（按架构分目录）
           FNDEPOT_FPK_PATHS=""
 
           # 循环处理每个架构映射
-          for ARCH_MAP in "${ARCH_MAP_LIST[@]}"; do
+          对于 ARCH_MAP 在 "${ARCH_MAP_LIST[@]}"; do
             # 拆分官方架构和platform值
-            IFS=':' read -r OFFICIAL_ARCH PLATFORM_VAL <<< "$ARCH_MAP"
+            IFS=':' 读取 -r OFFICIAL_ARCH PLATFORM_VAL < <( $ARCH_MAP )
             echo "========================================"
             echo "🚀 开始处理架构：$OFFICIAL_ARCH -> platform=$PLATFORM_VAL"
             echo "========================================"
             
             # 架构关键词映射（用于下载官方包）
-            case $OFFICIAL_ARCH in
-              Linux-AMD64)
+            case $OFFICIAL_ARCH 在
+              Linux-AMD64
                 ARCH_KEY="linux_amd64"
                 ARCH_SHORT="amd64"
                 ;;
@@ -294,15 +294,15 @@ jobs:
           
           # 初始化fnpack.json（按架构分字段）
           if [ ! -f "fnpack.json" ]; then
-            echo '{
-  "fpk-cloudreve": {
-    "version": "",
-    "architectures": {
-      "x86": "",
-      "arm": ""
-    }
-  }
-}' > fnpack.json
+                      echo '{
+            "fpk-cloudreve": {
+              "version": "",
+              "architectures": {
+                "x86": "",
+                "arm": ""
+              }
+            }
+          }' > fnpack.json
             echo "✅ 创建默认的fnpack.json文件（按架构分版本）"
           fi
           
@@ -330,21 +330,21 @@ jobs:
           # 检查README.md是否存在，不存在则创建（含platform列）
           if [ ! -f "README.md" ]; then
             echo "# FnDepot
-| **应用** | **版本** | **x86平台** | **arm平台** | **链接** |
-|----------|----------|-------------|-------------|----------|
-| **Cloudreve** | $REMOTE_VERSION | ✅ 支持 | ✅ 支持 | Cloudreve/https://cloudreve.org/ |
-
-Cloudreve自动化打包说明：
-- 版本：v$REMOTE_VERSION
-- platform字段规则：x86=AMD64架构，arm=ARM64架构
-- 脚本自动化仓库：https://github.com/moxyis/fpk-cloudreve" > README.md
-            echo "✅ 创建默认的README.md文件（含platform列）"
-          else
-            # 精准更新版本号（platform支持状态固定）
-            sed -i -E \
-              "s/(\|\s*\*\*Cloudreve\*\*\s*\|\s*)[0-9.]+\s*(\|\s*✅ 支持\s*\|\s*✅ 支持\s*\|\s*Cloudreve\/https:\/\/cloudreve.org\/\s*\|)/\1$REMOTE_VERSION\2/g" \
-              README.md
-              
+            | **应用** | **版本** | **x86平台** | **arm平台** | **链接** |
+            |----------|----------|-------------|-------------|----------|
+            | **Cloudreve** | $REMOTE_VERSION | ✅ 支持 | ✅ 支持 | Cloudreve/https://cloudreve.org/ |
+            
+            Cloudreve自动化打包说明：
+            - 版本：v$REMOTE_VERSION
+            - platform字段规则：x86=AMD64架构，arm=ARM64架构
+            - 脚本自动化仓库：https://github.com/moxyis/fpk-cloudreve" > README.md
+                        echo "✅ 创建默认的README.md文件（含platform列）"
+                      else
+                        # 精准更新版本号（platform支持状态固定）
+                        sed -i -E \
+                          "s/(\|\s*\*\*Cloudreve\*\*\s*\|\s*)[0-9.]+\s*(\|\s*✅ 支持\s*\|\s*✅ 支持\s*\|\s*Cloudreve\/https:\/\/cloudreve.org\/\s*\|)/\1$REMOTE_VERSION\2/g" \
+                          README.md
+                          
             echo "✅ README.md中Cloudreve版本已更新为：$REMOTE_VERSION"
           fi
           
