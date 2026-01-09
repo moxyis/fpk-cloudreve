@@ -36,11 +36,14 @@ jobs:
           fi
 
       # ===================== 第二步：版本比对（核心前置） =====================
-      - name: 3. 读取基础manifest的版本号
+      - name: 3. 读取基础manifest的版本号（确保基础目录完整）
         id: read_version
         run: |
-          # 初始化基础manifest（若不存在）
+          # 初始化基础Cloudreve目录及子目录（关键修复：确保app/bin存在）
+          mkdir -p Cloudreve/app/bin Cloudreve/app/conf
           MANIFEST_PATH="Cloudreve/manifest"
+          
+          # 初始化manifest文件（若不存在）
           if [ ! -f "$MANIFEST_PATH" ]; then
             echo "version: 0.0.0" > "$MANIFEST_PATH"
             echo "platform: x86" >> "$MANIFEST_PATH"
@@ -82,33 +85,41 @@ jobs:
           fi
 
       # ===================== 第三步：版本不一致时执行多架构打包 =====================
-      - name: 6. 复制基础目录并修改platform字段
+      - name: 6. 复制基础目录并修改platform字段（确保子目录完整）
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          # 1. 复制基础Cloudreve目录为x86/arm专属目录
+          # 1. 先删除旧的架构目录（避免残留）
           rm -rf Cloudreve-x86 Cloudreve-arm
+          
+          # 2. 复制基础Cloudreve目录（含完整子目录）
           cp -r Cloudreve Cloudreve-x86
           cp -r Cloudreve Cloudreve-arm
-          echo "✅ 复制基础目录为：Cloudreve-x86 / Cloudreve-arm"
+          
+          # 关键修复：强制创建app/bin目录（防止复制遗漏）
+          mkdir -p Cloudreve-x86/app/bin Cloudreve-x86/app/conf
+          mkdir -p Cloudreve-arm/app/bin Cloudreve-arm/app/conf
+          echo "✅ 复制基础目录并确保子目录完整：Cloudreve-x86 / Cloudreve-arm"
 
-          # 2. 修改x86目录的platform为x86，更新版本号
+          # 3. 修改x86目录的platform为x86，更新版本号
           sed -i -E \
             -e "s/(^[[:space:]]*platform[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2x86\4/" \
             -e "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2${{ steps.remote_version.outputs.remote_version }}\4/" \
             Cloudreve-x86/manifest
           
-          # 3. 修改arm目录的platform为arm，更新版本号
+          # 4. 修改arm目录的platform为arm，更新版本号
           sed -i -E \
             -e "s/(^[[:space:]]*platform[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2arm\4/" \
             -e "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2${{ steps.remote_version.outputs.remote_version }}\4/" \
             Cloudreve-arm/manifest
           
-          # 调试模式：输出修改后的manifest
+          # 调试模式：输出修改后的manifest和目录结构
           if [ "$DEBUG_MODE" = "true" ]; then
             echo "===== 调试：x86 manifest ====="
             cat Cloudreve-x86/manifest
             echo "===== 调试：arm manifest ====="
             cat Cloudreve-arm/manifest
+            echo "===== 调试：x86目录结构 ====="
+            ls -lhR Cloudreve-x86/
             echo "=============================="
           fi
 
@@ -125,7 +136,7 @@ jobs:
           fi
           echo "✅ fnpack安装完成：$(which fnpack)"
 
-      - name: 8. 批量打包x86/arm架构（核心步骤）
+      - name: 8. 批量打包x86/arm架构（核心修复：目录校验）
         if: steps.compare.outputs.need_update == 'true'
         id: build_packages
         run: |
@@ -145,7 +156,12 @@ jobs:
           for ARCH in "${!ARCH_CONFIG[@]}"; do
             DIR_NAME="Cloudreve-$ARCH"
             ASSET_MATCH=${ARCH_CONFIG[$ARCH]}
+            BIN_DIR="$DIR_NAME/app/bin"
             echo -e "\n========== 开始打包 $ARCH 架构 =========="
+
+            # 关键修复：再次校验并创建bin目录（双重保障）
+            mkdir -p "$BIN_DIR"
+            echo "✅ 确保 $ARCH 二进制目录存在：$BIN_DIR"
 
             # 1. 获取对应架构的下载链接
             RELEASE_DATA=$(curl -sSL --retry 3 --connect-timeout 10 \
@@ -157,6 +173,7 @@ jobs:
               echo "❌ 未找到 $ARCH 架构的资产（匹配：$ASSET_MATCH）"
               continue
             fi
+            echo "✅ $ARCH 下载链接：$DOWNLOAD_URL"
 
             # 2. 下载并解压二进制文件
             curl -SL --retry 3 --connect-timeout 10 -o /tmp/$ARCH.tar.gz "$DOWNLOAD_URL"
@@ -166,20 +183,32 @@ jobs:
               rm -f /tmp/$ARCH.tar.gz
               continue
             fi
+            echo "✅ $ARCH 二进制文件解压完成"
 
-            # 3. 替换目录内的二进制文件
-            mv /tmp/cloudreve "$DIR_NAME/app/bin/"
-            chmod +x "$DIR_NAME/app/bin/cloudreve"
+            # 3. 替换目录内的二进制文件（明确指定文件名）
+            mv /tmp/cloudreve "$BIN_DIR/cloudreve"
+            chmod +x "$BIN_DIR/cloudreve"
             rm -f /tmp/$ARCH.tar.gz /tmp/cloudreve
-            echo "✅ $ARCH 二进制文件已替换完成"
+            echo "✅ $ARCH 二进制文件已替换到：$BIN_DIR/cloudreve"
 
-            # 4. 执行fnpack打包
+            # 4. 验证二进制文件是否存在
+            if [ ! -f "$BIN_DIR/cloudreve" ]; then
+              echo "❌ $ARCH 二进制文件替换失败，文件不存在"
+              continue
+            fi
+
+            # 5. 执行fnpack打包
             cd "$DIR_NAME"
+            echo "🚀 执行打包命令：fnpack build"
             fnpack build
             cd -
 
-            # 5. 移动打包产物
+            # 6. 移动打包产物
             FPK_FILE=$(find "$DIR_NAME" -name "*.fpk" -type f | head -n1)
+            if [ -z "$FPK_FILE" ]; then
+              echo "❌ $ARCH 打包失败，未找到fpk文件"
+              continue
+            fi
             FPK_NAME="fpk-cloudreve-$ARCH-v${{ steps.remote_version.outputs.remote_version }}.fpk"
             mv "$FPK_FILE" "/tmp/cloudreve-packages/$FPK_NAME"
             
@@ -218,6 +247,10 @@ jobs:
           
           # 更新版本配置
           cd /tmp/FnDepot
+          # 确保fnpack.json存在
+          if [ ! -f "fnpack.json" ]; then
+            echo '{"fpk-cloudreve": {"x86": {"version": ""}, "arm": {"version": ""}}}' > fnpack.json
+          fi
           jq --arg ver "${{ steps.remote_version.outputs.remote_version }}" \
             '.["fpk-cloudreve"] = {"x86": {"version": $ver}, "arm": {"version": $ver}}' \
             fnpack.json > fnpack.tmp && mv fnpack.tmp fnpack.json
