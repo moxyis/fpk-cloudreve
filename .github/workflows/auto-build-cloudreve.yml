@@ -18,17 +18,13 @@ jobs:
       contents: write
 
     steps:
-      # 1. 拉代码
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # 2. 基础工具
       - name: 安装依赖
         run: sudo apt update && sudo apt install -y jq curl
 
-      # 3. 读取本地版本
-      - name: 读取本地 manifest 版本
+      - name: 读取本地版本
         id: local
         run: |
           if [ -f Cloudreve/manifest ]; then
@@ -38,7 +34,6 @@ jobs:
           fi
           echo "version=$v" >> $GITHUB_OUTPUT
 
-      # 4. 获取官方最新版本
       - name: 获取 Cloudreve 最新版本
         id: remote
         run: |
@@ -46,7 +41,6 @@ jobs:
           [ -z "$v" -o "$v" = "null" ] && exit 1
           echo "version=$v" >> $GITHUB_OUTPUT
 
-      # 5. 是否需要更新
       - name: 判断是否需要构建
         id: check
         run: |
@@ -56,14 +50,12 @@ jobs:
             echo "need=true" >> $GITHUB_OUTPUT
           fi
 
-      # 6. 安装 fnpack
       - name: 安装 fnpack
         if: steps.check.outputs.need == 'true'
         run: |
           curl -SL -o /usr/local/bin/fnpack https://static2.fnnas.com/fnpack/fnpack-1.2.0-linux-amd64
           chmod +x /usr/local/bin/fnpack
 
-      # 7. 多架构打包（核心）
       - name: 构建 x86 / arm FPK
         if: steps.check.outputs.need == 'true'
         id: build
@@ -73,10 +65,11 @@ jobs:
           RELEASE_FILES=""
 
           for ARCH in x86 arm; do
-            case "$ARCH" in
-              x86) KEY="linux_amd64" ;;
-              arm) KEY="linux_arm64" ;;
-            esac
+            if [ "$ARCH" = "x86" ]; then
+              KEY="linux_amd64"
+            else
+              KEY="linux_arm64"
+            fi
 
             URL=$(curl -s https://api.github.com/repos/cloudreve/Cloudreve/releases/latest \
               | jq -r ".assets[] | select(.name | contains(\"$KEY.tar.gz\")) | .browser_download_url" | head -n1)
@@ -92,23 +85,19 @@ jobs:
             mv /tmp/cloudreve "$WORKDIR/app/bin/cloudreve"
             chmod +x "$WORKDIR/app/bin/cloudreve"
 
-            cat > "$WORKDIR/manifest" <<EOF
-version: $VERSION
-platform: $ARCH
-EOF
+            echo -e "version: $VERSION\nplatform: $ARCH" > "$WORKDIR/manifest"
 
             cd "$WORKDIR"
             fnpack build
             FPK=$(ls *.fpk)
             OUT="/tmp/fpk-cloudreve-v$VERSION-$ARCH.fpk"
             mv "$FPK" "$OUT"
-            RELEASE_FILES+="$OUT "
+            RELEASE_FILES="$RELEASE_FILES $OUT"
             cd -
           done
 
           echo "files=$RELEASE_FILES" >> $GITHUB_OUTPUT
 
-      # 8. 更新主仓库 manifest
       - name: 更新主 manifest
         if: steps.check.outputs.need == 'true' && github.event.inputs.debug_mode != 'true'
         run: |
@@ -119,8 +108,7 @@ EOF
           git commit -m "chore: update Cloudreve v${{ steps.remote.outputs.version }}" || true
           git push
 
-      # 9. 创建 Release
-      - name: 创建 GitHub Release
+      - name: 创建 Release
         if: steps.check.outputs.need == 'true' && github.event.inputs.debug_mode != 'true'
         uses: softprops/action-gh-release@v2
         with:
