@@ -275,6 +275,7 @@ jobs:
           mkdir -p /tmp/FnDepot/fpk-cloudreve/x86 /tmp/FnDepot/fpk-cloudreve/arm
           cp /tmp/cloudreve-packages/fpk-cloudreve-x86-* /tmp/FnDepot/fpk-cloudreve/x86/
           cp /tmp/cloudreve-packages/fpk-cloudreve-arm-* /tmp/FnDepot/fpk-cloudreve/arm/
+          cp /tmp/cloudreve-packages/fpk-cloudreve-x86-* /tmp/FnDepot/fpk-cloudreve/fpk-cloudreve.fpk
           
            # 更新版本配置（核心：仅修改fpk-cloudreve.version，保留所有其他内容）
           cd /tmp/FnDepot
