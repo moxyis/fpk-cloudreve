@@ -276,14 +276,11 @@ jobs:
           cp /tmp/cloudreve-packages/fpk-cloudreve-x86-* /tmp/FnDepot/fpk-cloudreve/x86/
           cp /tmp/cloudreve-packages/fpk-cloudreve-arm-* /tmp/FnDepot/fpk-cloudreve/arm/
           
-          # 更新版本配置
+           # 更新版本配置（核心：仅修改fpk-cloudreve.version，保留所有其他内容）
           cd /tmp/FnDepot
-          # 确保fnpack.json存在
-          if [ ! -f "fnpack.json" ]; then
-            echo '{"fpk-cloudreve": {"x86": {"version": ""}, "arm": {"version": ""}}}' > fnpack.json
-          fi
+          # 直接更新version字段，不初始化文件（假设fnpack.json已存在且有完整结构）
           jq --arg ver "${{ steps.remote_version.outputs.remote_version }}" \
-            '.["fpk-cloudreve"] = {"x86": {"version": $ver}, "arm": {"version": $ver}}' \
+            '.["fpk-cloudreve"].version = $ver' \
             fnpack.json > fnpack.tmp && mv fnpack.tmp fnpack.json
           
           # 提交并推送
