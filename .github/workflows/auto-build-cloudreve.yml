@@ -371,7 +371,7 @@ jobs:
 
           cat "$JSON_FILE"
 
-      - name: 12. 生产模式：更新 FnDepot README
+            - name: 12. 生产模式：更新 FnDepot README
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
           set -euo pipefail
@@ -380,25 +380,49 @@ jobs:
           README_FILE="/tmp/FnDepot/README.md"
           SOURCE_URL="https://github.com/${UPSTREAM_REPO}"
 
-          if [ ! -f "$README_FILE" ]; then
-            cat > "$README_FILE" <<EOF
-# FnDepot
-
-| 应用名称 | 版本号 | 来源 | 类型 |
-|---|---|---|---|
-EOF
-          fi
-
           NEW_ROW="| **${APP_NAME}** | ${REMOTE_VERSION} | ${SOURCE_URL} | ${APP_TYPE} |"
 
-          if grep -qE "\*\*${APP_NAME}\*\*" "$README_FILE"; then
+          if [ ! -f "$README_FILE" ]; then
+            {
+              echo "# FnDepot"
+              echo ""
+              echo "| 应用名称 | 版本号 | 来源 | 类型 |"
+              echo "|---|---|---|---|"
+              echo "$NEW_ROW"
+            } > "$README_FILE"
+            exit 0
+          fi
+
+          if grep -qF "**${APP_NAME}**" "$README_FILE"; then
             awk -v app="$APP_NAME" -v row="$NEW_ROW" '
-              $0 ~ "\\*\\*" app "\\*\\*" { print row; next }
+              $0 ~ "\\*\\*" app "\\*\\*" {
+                print row
+                next
+              }
               { print }
             ' "$README_FILE" > "$README_FILE.tmp"
             mv "$README_FILE.tmp" "$README_FILE"
           else
-            echo "$NEW_ROW" >> "$README_FILE"
+            if grep -q '^| 应用名称 |' "$README_FILE"; then
+              awk -v row="$NEW_ROW" '
+                BEGIN { added=0 }
+                {
+                  print
+                  if ($0 ~ /^\|---/ && added==0) {
+                    print row
+                    added=1
+                  }
+                }
+              ' "$README_FILE" > "$README_FILE.tmp"
+              mv "$README_FILE.tmp" "$README_FILE"
+            else
+              {
+                echo ""
+                echo "| 应用名称 | 版本号 | 来源 | 类型 |"
+                echo "|---|---|---|---|"
+                echo "$NEW_ROW"
+              } >> "$README_FILE"
+            fi
           fi
 
           echo "README 更新结果："
