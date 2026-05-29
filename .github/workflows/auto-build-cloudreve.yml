@@ -114,12 +114,35 @@ jobs:
         if: steps.compare.outputs.need_update == 'true'
         run: |
           set -euo pipefail
-          FNPACK_URL="${FNPACK_BASE_URL}/fnpack-${FNPACK_VERSION}-linux-amd64"
-          HTTP_CODE=$(curl -L --retry 3 --connect-timeout 10 -w "%{http_code}" -o /tmp/fnpack "$FNPACK_URL")
-          [ "$HTTP_CODE" != "200" ] && { echo "❌ fnpack 下载失败"; exit 1; }
+
+          FNPACK_URL="${FNPACK_BASE_URL}/fnpack-${FNPACK_VERSION}-${FNPACK_PLATFORM}"
+
+          echo "fnpack 下载地址：$FNPACK_URL"
+
+          HTTP_CODE=$(curl -L --retry 3 --connect-timeout 10 \
+            -w "%{http_code}" \
+            -o /tmp/fnpack \
+            "$FNPACK_URL")
+
+          echo "HTTP状态码：$HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ fnpack 下载失败，请检查 FNPACK_VERSION：$FNPACK_VERSION"
+            head -n 20 /tmp/fnpack || true
+            exit 1
+          fi
+
           if head -n 1 /tmp/fnpack | grep -qiE '<!DOCTYPE|<html'; then
-            echo "❌ 下载到 HTML 文件"; exit 1; fi
+            echo "❌ 下载到的是 HTML，不是 fnpack 二进制"
+            head -n 20 /tmp/fnpack
+            exit 1
+          fi
+
           install -m 755 /tmp/fnpack /usr/local/bin/fnpack
+
+          which fnpack
+          file /usr/local/bin/fnpack
+          fnpack --help | head -n 10 || true
 
       - name: 7. 通用多架构打包
         if: steps.compare.outputs.need_update == 'true'
