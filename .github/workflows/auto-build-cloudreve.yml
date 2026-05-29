@@ -24,7 +24,9 @@ env:
   UPSTREAM_REPO: "cloudreve/Cloudreve"
   BINARY_NAME: "cloudreve"
 
-  FNPACK_URL: "https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64"
+  FNPACK_VERSION: "1.2.1"
+  FNPACK_BASE_URL: "https://static2.fnnas.com/fnpack/fnpack-${FNPACK_VERSION}-linux-amd64"
+
   PACKAGE_DIR: "/tmp/fpk-packages"
 
   FNDEPOT_REPO: "moxyis/FnDepot"
@@ -66,6 +68,7 @@ jobs:
           echo "APP_NAME=$APP_NAME"
           echo "BASE_DIR=$BASE_DIR"
           echo "UPSTREAM_REPO=$UPSTREAM_REPO"
+          echo "FNPACK_VERSION=$FNPACK_VERSION"
           echo "BUILD_TIME=$BUILD_TIME"
 
       - name: 3. 读取本地版本
@@ -139,6 +142,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          FNPACK_URL="${FNPACK_BASE_URL}"
+
+          echo "下载 fnpack：$FNPACK_URL"
           curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
           chmod +x /usr/local/bin/fnpack
 
@@ -173,24 +179,6 @@ jobs:
               -e "s/(^[[:space:]]*platform[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2${arch}\4/" \
               -e "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2${REMOTE_VERSION}\4/" \
               "$dir/manifest"
-          }
-
-          fix_fnpack_json_config() {
-            local dir="$1"
-
-            # fnpack 会把 app/ui/config 当 JSON 解析。
-            # 如果不是合法 JSON，就自动备份并写入空 JSON，避免 invalid character 报错。
-            local config_file="$dir/app/ui/config"
-
-            if [ -f "$config_file" ]; then
-              if ! jq empty "$config_file" >/dev/null 2>&1; then
-                echo "⚠️ $config_file 不是合法 JSON，自动备份并替换为 {}"
-                cp "$config_file" "$config_file.bak"
-                echo "{}" > "$config_file"
-              else
-                echo "✅ $config_file 是合法 JSON"
-              fi
-            fi
           }
 
           download_binary() {
@@ -250,7 +238,6 @@ jobs:
             mkdir -p "$bin_dir" "$build_dir/app/conf"
 
             fix_manifest "$build_dir" "$arch"
-            fix_fnpack_json_config "$build_dir"
             download_binary "$arch" "$asset_match" "$bin_dir"
 
             echo "manifest 内容："
@@ -323,7 +310,6 @@ jobs:
             cp "$PACKAGE_DIR/${APP_ID}-${ARCH}-v${REMOTE_VERSION}.fpk" "/tmp/FnDepot/$FNDEPOT_APP_DIR/$ARCH/"
           done
 
-          # 默认包使用第一个架构
           DEFAULT_ARCH=$(echo "$ARCH_LIST" | awk '{print $1}')
           cp "$PACKAGE_DIR/${APP_ID}-${DEFAULT_ARCH}-v${REMOTE_VERSION}.fpk" "/tmp/FnDepot/$FNDEPOT_APP_DIR/${APP_ID}.fpk"
 
@@ -356,7 +342,7 @@ jobs:
             - 版本：v${{ steps.remote_version.outputs.remote_version }}
             - 支持架构：${{ env.ARCH_LIST }}
             - 打包时间：${{ steps.init.outputs.build_time }}
-            - 打包工具：fnpack
+            - fnpack版本：${{ env.FNPACK_VERSION }}
 
           files: ${{ steps.build_packages.outputs.release_files }}
           prerelease: false
