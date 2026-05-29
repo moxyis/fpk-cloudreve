@@ -26,6 +26,7 @@ env:
   APP_TYPE: "GitHub"
 
   FNPACK_VERSION: "1.2.1"
+  FNPACK_PLATFORM: "linux-amd64"
   FNPACK_BASE_URL: "https://static2.fnnas.com/fnpack"
 
   PACKAGE_DIR: "/tmp/fpk-packages"
