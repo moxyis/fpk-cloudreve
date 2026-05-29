@@ -134,7 +134,7 @@ jobs:
       - name: 8. 下载并安装fnpack
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.2.0-linux-amd64"
+          FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.2.1-linux-amd64"
           curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
           chmod +x /usr/local/bin/fnpack
 
