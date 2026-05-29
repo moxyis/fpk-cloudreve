@@ -25,7 +25,7 @@ env:
   BINARY_NAME: "cloudreve"
 
   FNPACK_VERSION: "1.2.1"
-  FNPACK_BASE_URL: "https://static2.fnnas.com/fnpack/fnpack-${FNPACK_VERSION}-linux-amd64"
+  FNPACK_BASE_URL: "https://static2.fnnas.com/fnpack"
 
   PACKAGE_DIR: "/tmp/fpk-packages"
 
@@ -145,8 +145,10 @@ jobs:
           FNPACK_URL="${FNPACK_BASE_URL}"
 
           echo "下载 fnpack：$FNPACK_URL"
+          FNPACK_URL="${FNPACK_BASE_URL}/fnpack-${FNPACK_VERSION}-linux-amd64"
           curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
           chmod +x /usr/local/bin/fnpack
+          
 
           which fnpack
           fnpack version || true
