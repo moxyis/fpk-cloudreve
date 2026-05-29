@@ -15,32 +15,26 @@ on:
     - cron: '0 0 * * *'
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
-
   APP_ID: "fpk-cloudreve"
   APP_NAME: "Cloudreve"
   BASE_DIR: "Cloudreve"
   UPSTREAM_REPO: "cloudreve/Cloudreve"
   BINARY_NAME: "cloudreve"
   APP_TYPE: "GitHub"
-
   FNPACK_VERSION: "1.2.1"
   FNPACK_PLATFORM: "linux-amd64"
   FNPACK_BASE_URL: "https://static2.fnnas.com/fnpack"
-
   PACKAGE_DIR: "/tmp/fpk-packages"
-
   FNDEPOT_REPO: "moxyis/FnDepot"
   FNDEPOT_BRANCH: "main"
   FNDEPOT_APP_DIR: "fpk-cloudreve"
-
   ARCH_LIST: "x86 arm"
   ASSET_x86: "linux_amd64.tar.gz"
   ASSET_arm: "linux_arm64.tar.gz"
 
 jobs:
-  build-multi-arch:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -53,7 +47,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 2. 初始化环境
+      - name: 2. 初始化
         id: init
         run: |
           set -euo pipefail
@@ -82,11 +76,9 @@ jobs:
       - name: 5. 判断是否需要打包
         id: compare
         run: |
-          LOCAL_VERSION="${{ steps.local_version.outputs.local_version }}"
-          REMOTE_VERSION="${{ steps.remote_version.outputs.remote_version }}"
           if [ "$DEBUG_MODE" = "true" ]; then
             echo "need_update=true" >> "$GITHUB_OUTPUT"
-          elif [ "$LOCAL_VERSION" = "$REMOTE_VERSION" ]; then
+          elif [ "${{ steps.local_version.outputs.local_version }}" = "${{ steps.remote_version.outputs.remote_version }}" ]; then
             echo "need_update=false" >> "$GITHUB_OUTPUT"
           else
             echo "need_update=true" >> "$GITHUB_OUTPUT"
@@ -95,9 +87,9 @@ jobs:
       - name: 6. 下载并安装 fnpack
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          FNPACK_URL="${FNPACK_BASE_URL}/fnpack-${FNPACK_VERSION}-${FNPACK_PLATFORM}"
-          curl -SL -o /tmp/fnpack "$FNPACK_URL"
+          curl -SL -o /tmp/fnpack "${FNPACK_BASE_URL}/fnpack-${FNPACK_VERSION}-${FNPACK_PLATFORM}"
           install -m 755 /tmp/fnpack /usr/local/bin/fnpack
+          fnpack --help | head -n 20 || true
 
       - name: 7. 多架构打包
         if: steps.compare.outputs.need_update == 'true'
@@ -109,43 +101,48 @@ jobs:
 
           RELEASE_DATA=$(curl -sSL https://api.github.com/repos/$UPSTREAM_REPO/releases/latest)
 
-          get_asset_match() { local arch="$1"; echo "${!ARCH_$arch}"; }
+          get_asset_match() {
+            local arch="$1"
+            local varname="ASSET_${arch}"
+            echo "${!varname}"
+          }
 
           fix_manifest() {
-            local dir="$1"; local arch="$2"
+            local dir="$1"
+            local arch="$2"
             sed -i -E -e "s/(^[[:space:]]*platform[[:space:]]*[:=][[:space:]]*).*/\1${arch}/" \
                       -e "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*).*/\1${{ steps.remote_version.outputs.remote_version }}/" "$dir/manifest"
           }
 
           download_binary() {
-            local arch="$1"; local asset_match="$2"; local bin_dir="$3"
+            local arch="$1"
+            local asset="$2"
+            local bin_dir="$3"
             local download_url
-            download_url=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name | contains(\"$asset_match\")) | .browser_download_url" | head -n1)
+            download_url=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name | contains(\"$asset\")) | .browser_download_url" | head -n1)
             mkdir -p "$bin_dir"
             curl -SL -o "/tmp/${arch}.tar.gz" "$download_url"
             tar -zxf "/tmp/${arch}.tar.gz" -C "$bin_dir/../"
           }
 
           build_one_arch() {
-            local arch="$1"; local asset_match
-            asset_match=$(get_asset_match "$arch")
-
+            local arch="$1"
+            local asset=$(get_asset_match "$arch")
             local build_dir="$PACKAGE_DIR/$arch/$APP_ID"
+            rm -rf "$(dirname "$build_dir")"
             mkdir -p "$(dirname "$build_dir")"
             cp -r "$BASE_DIR" "$build_dir"
             mkdir -p "$build_dir/app/bin" "$build_dir/app/conf"
 
             fix_manifest "$build_dir" "$arch"
-            download_binary "$arch" "$asset_match" "$build_dir/app/bin"
+            download_binary "$arch" "$asset" "$build_dir/app/bin"
 
             fnpack build --directory "$PACKAGE_DIR/$arch/$APP_ID"
 
             local fpk_file
             fpk_file=$(find "$PACKAGE_DIR/$arch" -maxdepth 1 -type f -name "*.fpk" | head -n1)
-
             mv "$fpk_file" "$PACKAGE_DIR/$arch/${APP_ID}.fpk"
             cp "$PACKAGE_DIR/$arch/${APP_ID}.fpk" "$PACKAGE_DIR/${APP_ID}_${arch}_${{ steps.remote_version.outputs.remote_version }}.fpk"
-
             RELEASE_FILES+="$PACKAGE_DIR/${APP_ID}_${arch}_${{ steps.remote_version.outputs.remote_version }}.fpk"$'\n'
           }
 
@@ -167,7 +164,7 @@ jobs:
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: git clone "https://${{ secrets.FnDepot_PAT }}@github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
 
-      - name: 10. 推送到 FnDepot
+      - name: 10. 推送 FnDepot
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
           mkdir -p "/tmp/FnDepot/$FNDEPOT_APP_DIR"
@@ -197,14 +194,14 @@ jobs:
             echo -e "\n| 应用名称 | 版本号 | 来源 | 类型 |\n|---|---|---|---|\n$NEW_ROW" >> "$README_FILE"
           fi
 
-      - name: 13. 提交 FnDepot 变更
+      - name: 13. 提交 FnDepot
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
           cd /tmp/FnDepot
           git add "$FNDEPOT_APP_DIR/" fnpack.json README.md
           git diff --cached --quiet || git commit -m "chore: 更新${APP_NAME}多架构版本至${{ steps.remote_version.outputs.remote_version }}" && git push origin "$FNDEPOT_BRANCH"
 
-      - name: 14. 创建 GitHub Release
+      - name: 14. 创建 Release
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         uses: softprops/action-gh-release@v3
         with:
@@ -217,7 +214,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 15. 更新基础 manifest
+      - name: 15. 更新 manifest
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
           sed -i -E "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*).*/\1${{ steps.remote_version.outputs.remote_version }}/" "$BASE_DIR/manifest"
