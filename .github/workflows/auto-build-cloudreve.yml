@@ -42,14 +42,13 @@ env:
 jobs:
   build-multi-arch:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
       pull-requests: read
 
     steps:
       - name: 1. 检出仓库
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -66,50 +65,28 @@ jobs:
       - name: 3. 读取本地版本
         id: local_version
         run: |
-          set -euo pipefail
           mkdir -p "$BASE_DIR/app/bin" "$BASE_DIR/app/conf"
           MANIFEST_PATH="$BASE_DIR/manifest"
-
-          if [ ! -f "$MANIFEST_PATH" ]; then
-            echo "version: 0.0.0" > "$MANIFEST_PATH"
-            echo "platform: x86" >> "$MANIFEST_PATH"
-          fi
-
-          LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "$MANIFEST_PATH" \
-            | head -n1 | tr -d '"' | tr -d "'" | tr -d '\r\n' | sed 's/^v//' | xargs)
-
+          [ ! -f "$MANIFEST_PATH" ] && echo -e "version: 0.0.0\nplatform: x86" > "$MANIFEST_PATH"
+          LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "$MANIFEST_PATH" | head -n1 | tr -d '"' | tr -d "'" | xargs)
           [ -z "$LOCAL_VERSION" ] && LOCAL_VERSION="0.0.0"
           echo "local_version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: 4. 获取官方最新版本
         id: remote_version
         run: |
-          set -euo pipefail
-          REMOTE_VERSION=$(curl -sSL --retry 3 --connect-timeout 10 \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest" \
-            | jq -r '.tag_name' | sed 's/^v//' | tr -d '\r\n' | xargs)
-
-          if [ -z "$REMOTE_VERSION" ] || [ "$REMOTE_VERSION" = "null" ]; then
-            echo "❌ 获取远程版本失败"
-            exit 1
-          fi
-
+          REMOTE_VERSION=$(curl -sSL https://api.github.com/repos/$UPSTREAM_REPO/releases/latest | jq -r '.tag_name' | tr -d 'v' | xargs)
+          [ -z "$REMOTE_VERSION" ] && { echo "❌ 获取远程版本失败"; exit 1; }
           echo "remote_version=$REMOTE_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: 5. 判断是否需要打包
         id: compare
         run: |
-          set -euo pipefail
           LOCAL_VERSION="${{ steps.local_version.outputs.local_version }}"
           REMOTE_VERSION="${{ steps.remote_version.outputs.remote_version }}"
-
           if [ "$DEBUG_MODE" = "true" ]; then
             echo "need_update=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "$LOCAL_VERSION" = "$REMOTE_VERSION" ]; then
+          elif [ "$LOCAL_VERSION" = "$REMOTE_VERSION" ]; then
             echo "need_update=false" >> "$GITHUB_OUTPUT"
           else
             echo "need_update=true" >> "$GITHUB_OUTPUT"
@@ -118,136 +95,61 @@ jobs:
       - name: 6. 下载并安装 fnpack
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          set -euo pipefail
           FNPACK_URL="${FNPACK_BASE_URL}/fnpack-${FNPACK_VERSION}-${FNPACK_PLATFORM}"
-          curl -SL --retry 3 --connect-timeout 10 -o /tmp/fnpack "$FNPACK_URL"
+          curl -SL -o /tmp/fnpack "$FNPACK_URL"
           install -m 755 /tmp/fnpack /usr/local/bin/fnpack
-          fnpack --help | head -n 20 || true
 
       - name: 7. 多架构打包
         if: steps.compare.outputs.need_update == 'true'
         id: build_packages
         run: |
           set -euo pipefail
-
-          REMOTE_VERSION="${{ steps.remote_version.outputs.remote_version }}"
           mkdir -p "$PACKAGE_DIR"
           RELEASE_FILES=""
 
-          RELEASE_DATA=$(curl -sSL --retry 3 --connect-timeout 10 \
-            "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest")
+          RELEASE_DATA=$(curl -sSL https://api.github.com/repos/$UPSTREAM_REPO/releases/latest)
 
-          get_asset_match() {
-            local arch="$1"
-            local var_name="ASSET_${arch}"
-            echo "${!var_name}"
-          }
+          get_asset_match() { local arch="$1"; echo "${!ARCH_$arch}"; }
 
           fix_manifest() {
-            local dir="$1"
-            local arch="$2"
-
-            sed -i -E \
-              -e "s/(^[[:space:]]*platform[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2${arch}\4/" \
-              -e "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2${REMOTE_VERSION}\4/" \
-              "$dir/manifest"
+            local dir="$1"; local arch="$2"
+            sed -i -E -e "s/(^[[:space:]]*platform[[:space:]]*[:=][[:space:]]*).*/\1${arch}/" \
+                      -e "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*).*/\1${{ steps.remote_version.outputs.remote_version }}/" "$dir/manifest"
           }
 
           download_binary() {
-            local arch="$1"
-            local asset_match="$2"
-            local bin_dir="$3"
-
+            local arch="$1"; local asset_match="$2"; local bin_dir="$3"
             local download_url
-            download_url=$(echo "$RELEASE_DATA" | jq -r \
-              '.assets[] | select(.name | contains("'"$asset_match"'")) | .browser_download_url' \
-              | head -n1)
-
-            if [ -z "$download_url" ] || [ "$download_url" = "null" ]; then
-              echo "❌ 未找到 $arch 架构资产：$asset_match"
-              echo "官方 Release 资产列表："
-              echo "$RELEASE_DATA" | jq -r '.assets[].name'
-              exit 1
-            fi
-
-            local extract_dir="/tmp/${APP_ID}_extract_${arch}"
-            rm -rf "$extract_dir"
-            mkdir -p "$extract_dir"
-
-            curl -SL --retry 3 --connect-timeout 10 \
-              -o "/tmp/${arch}.tar.gz" \
-              "$download_url"
-
-            tar -zxf "/tmp/${arch}.tar.gz" -C "$extract_dir"
-
-            local binary_file
-            binary_file=$(find "$extract_dir" -type f -name "$BINARY_NAME" | head -n1)
-
-            if [ -z "$binary_file" ]; then
-              echo "❌ 解压后未找到二进制文件：$BINARY_NAME"
-              find "$extract_dir" -type f
-              exit 1
-            fi
-
+            download_url=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name | contains(\"$asset_match\")) | .browser_download_url" | head -n1)
             mkdir -p "$bin_dir"
-            cp "$binary_file" "$bin_dir/$BINARY_NAME"
-            chmod +x "$bin_dir/$BINARY_NAME"
+            curl -SL -o "/tmp/${arch}.tar.gz" "$download_url"
+            tar -zxf "/tmp/${arch}.tar.gz" -C "$bin_dir/../"
           }
 
           build_one_arch() {
-            local arch="$1"
-            local asset_match
+            local arch="$1"; local asset_match
             asset_match=$(get_asset_match "$arch")
 
-            local build_parent="/tmp/fpk-build-${arch}"
-            local build_dir="$build_parent/${APP_ID}"
-            local bin_dir="$build_dir/app/bin"
-            local arch_package_dir="$PACKAGE_DIR/$arch"
-
-            echo "========== 开始打包 $arch =========="
-            echo "匹配资产：$asset_match"
-
-            rm -rf "$build_parent" "$arch_package_dir"
-            mkdir -p "$build_parent" "$arch_package_dir"
-
+            local build_dir="$PACKAGE_DIR/$arch/$APP_ID"
+            mkdir -p "$(dirname "$build_dir")"
             cp -r "$BASE_DIR" "$build_dir"
-            mkdir -p "$bin_dir" "$build_dir/app/conf"
+            mkdir -p "$build_dir/app/bin" "$build_dir/app/conf"
 
             fix_manifest "$build_dir" "$arch"
-            download_binary "$arch" "$asset_match" "$bin_dir"
+            download_binary "$arch" "$asset_match" "$build_dir/app/bin"
 
-            cd "$build_parent"
-
-            # 关键：包内根目录固定为 APP_ID，不带架构和版本号
-            fnpack build -d "$APP_ID"
+            fnpack build --directory "$PACKAGE_DIR/$arch/$APP_ID"
 
             local fpk_file
-            fpk_file=$(find "$build_parent" -maxdepth 1 -type f -name "*.fpk" | head -n1)
+            fpk_file=$(find "$PACKAGE_DIR/$arch" -maxdepth 1 -type f -name "*.fpk" | head -n1)
 
-            if [ -z "$fpk_file" ]; then
-              echo "❌ $arch 打包失败，未找到 .fpk 文件"
-              find "$build_parent" -type f
-              exit 1
-            fi
+            mv "$fpk_file" "$PACKAGE_DIR/$arch/${APP_ID}.fpk"
+            cp "$PACKAGE_DIR/$arch/${APP_ID}.fpk" "$PACKAGE_DIR/${APP_ID}_${arch}_${{ steps.remote_version.outputs.remote_version }}.fpk"
 
-            mv "$fpk_file" "$arch_package_dir/${APP_ID}-${arch}.fpk"
-
-            cp "$arch_package_dir/${APP_ID}-${arch}.fpk" \
-               "$PACKAGE_DIR/${APP_ID}-${arch}-v${REMOTE_VERSION}.fpk"
-
-            RELEASE_FILES+="$PACKAGE_DIR/${APP_ID}-${arch}-v${REMOTE_VERSION}.fpk"$'\n'
-
-            echo "✅ $arch 打包完成：$arch_package_dir/${APP_ID}-${arch}.fpk"
-            sha256sum "$arch_package_dir/${APP_ID}-${arch}.fpk"
-
-            cd "$GITHUB_WORKSPACE"
+            RELEASE_FILES+="$PACKAGE_DIR/${APP_ID}_${arch}_${{ steps.remote_version.outputs.remote_version }}.fpk"$'\n'
           }
 
-          for ARCH in $ARCH_LIST; do
-            build_one_arch "$ARCH"
-          done
-
-          RELEASE_FILES=$(echo "$RELEASE_FILES" | sed '/^$/d')
+          for ARCH in $ARCH_LIST; do build_one_arch "$ARCH"; done
 
           echo "release_files<<EOF" >> "$GITHUB_OUTPUT"
           echo "$RELEASE_FILES" >> "$GITHUB_OUTPUT"
@@ -257,126 +159,58 @@ jobs:
       - name: 8. Debug 模式验证
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'true'
         run: |
-          set -euo pipefail
-          find "$PACKAGE_DIR" -type f -name "*.fpk" -print
+          find "$PACKAGE_DIR" -type f -name "*.fpk"
           sha256sum "$PACKAGE_DIR"/*/*.fpk
           sha256sum "$PACKAGE_DIR"/*.fpk
 
       - name: 9. 克隆 FnDepot
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-          rm -rf /tmp/FnDepot
-          git clone "https://${{ secrets.FnDepot_PAT }}@github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
+        run: git clone "https://${{ secrets.FnDepot_PAT }}@github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
 
-      - name: 10. 复制 fpk 到 FnDepot
+      - name: 10. 推送到 FnDepot
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
-          set -euo pipefail
           mkdir -p "/tmp/FnDepot/$FNDEPOT_APP_DIR"
-
           for ARCH in $ARCH_LIST; do
-            cp "$PACKAGE_DIR/$ARCH/${APP_ID}-${ARCH}.fpk" \
-               "/tmp/FnDepot/$FNDEPOT_APP_DIR/${APP_ID}-${ARCH}.fpk"
+            cp "$PACKAGE_DIR/$ARCH/${APP_ID}.fpk" "/tmp/FnDepot/$FNDEPOT_APP_DIR/${APP_ID}_${ARCH}.fpk"
           done
-
-          find "/tmp/FnDepot/$FNDEPOT_APP_DIR" -type f -name "*.fpk" -print
 
       - name: 11. 更新 fnpack.json
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
-          set -euo pipefail
-          REMOTE_VERSION="${{ steps.remote_version.outputs.remote_version }}"
           JSON_FILE="/tmp/FnDepot/fnpack.json"
-
           [ ! -f "$JSON_FILE" ] && echo '{}' > "$JSON_FILE"
-
-          jq --arg app "$APP_ID" --arg ver "$REMOTE_VERSION" \
-            '.[$app] = (.[$app] // {}) | .[$app].version = $ver' \
-            "$JSON_FILE" > "$JSON_FILE.tmp"
-
+          jq --arg app "$APP_ID" --arg ver "${{ steps.remote_version.outputs.remote_version }}" '.[$app] = (.[$app] // {}) | .[$app].version = $ver' "$JSON_FILE" > "$JSON_FILE.tmp"
           mv "$JSON_FILE.tmp" "$JSON_FILE"
 
       - name: 12. 更新 README
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
-          set -euo pipefail
-          REMOTE_VERSION="${{ steps.remote_version.outputs.remote_version }}"
           README_FILE="/tmp/FnDepot/README.md"
-          SOURCE_URL="https://github.com/${UPSTREAM_REPO}"
-          NEW_ROW="| **${APP_NAME}** | ${REMOTE_VERSION} | ${SOURCE_URL} | ${APP_TYPE} |"
-
+          NEW_ROW="| **${APP_NAME}** | ${{ steps.remote_version.outputs.remote_version }} | https://github.com/${UPSTREAM_REPO} | ${APP_TYPE} |"
           if [ ! -f "$README_FILE" ]; then
-            {
-              echo "# FnDepot"
-              echo ""
-              echo "| 应用名称 | 版本号 | 来源 | 类型 |"
-              echo "|---|---|---|---|"
-              echo "$NEW_ROW"
-            } > "$README_FILE"
+            echo -e "# FnDepot\n\n| 应用名称 | 版本号 | 来源 | 类型 |\n|---|---|---|---|\n$NEW_ROW" > "$README_FILE"
           elif grep -qF "**${APP_NAME}**" "$README_FILE"; then
-            awk -v app="$APP_NAME" -v row="$NEW_ROW" '
-              $0 ~ "\\*\\*" app "\\*\\*" {
-                print row
-                next
-              }
-              { print }
-            ' "$README_FILE" > "$README_FILE.tmp"
-            mv "$README_FILE.tmp" "$README_FILE"
-          elif grep -q '^| 应用名称 |' "$README_FILE"; then
-            awk -v row="$NEW_ROW" '
-              BEGIN { added=0 }
-              {
-                print
-                if ($0 ~ /^\|---/ && added==0) {
-                  print row
-                  added=1
-                }
-              }
-            ' "$README_FILE" > "$README_FILE.tmp"
+            awk -v row="$NEW_ROW" '$0 ~ "\\*\\*" app "\\*\\*" {print row; next} {print}' "$README_FILE" > "$README_FILE.tmp"
             mv "$README_FILE.tmp" "$README_FILE"
           else
-            {
-              echo ""
-              echo "| 应用名称 | 版本号 | 来源 | 类型 |"
-              echo "|---|---|---|---|"
-              echo "$NEW_ROW"
-            } >> "$README_FILE"
+            echo -e "\n| 应用名称 | 版本号 | 来源 | 类型 |\n|---|---|---|---|\n$NEW_ROW" >> "$README_FILE"
           fi
 
       - name: 13. 提交 FnDepot 变更
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
-          set -euo pipefail
-          REMOTE_VERSION="${{ steps.remote_version.outputs.remote_version }}"
-          BUILD_TIME="${{ steps.init.outputs.build_time }}"
-
           cd /tmp/FnDepot
           git add "$FNDEPOT_APP_DIR/" fnpack.json README.md
-
-          if git diff --cached --quiet; then
-            echo "✅ FnDepot 无变更，跳过提交"
-          else
-            git commit -m "chore: 更新${APP_NAME}多架构版本至${REMOTE_VERSION}（打包时间：${BUILD_TIME}）"
-            git push origin "$FNDEPOT_BRANCH"
-          fi
+          git diff --cached --quiet || git commit -m "chore: 更新${APP_NAME}多架构版本至${{ steps.remote_version.outputs.remote_version }}" && git push origin "$FNDEPOT_BRANCH"
 
       - name: 14. 创建 GitHub Release
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           overwrite_files: true
-          tag_name: "${{ env.APP_NAME }}-v${{ steps.remote_version.outputs.remote_version }}"
-          name: "${{ env.APP_NAME }} v${{ steps.remote_version.outputs.remote_version }}（多架构）"
-          body: |
-            ## ${{ env.APP_NAME }} 多架构自动打包
-
-            - 应用：${{ env.APP_NAME }}
-            - 版本：v${{ steps.remote_version.outputs.remote_version }}
-            - 支持架构：${{ env.ARCH_LIST }}
-            - 打包时间：${{ steps.init.outputs.build_time }}
-            - fnpack版本：${{ env.FNPACK_VERSION }}
-
+          tag_name: "${APP_NAME}-v${{ steps.remote_version.outputs.remote_version }}"
+          name: "${APP_NAME} v${{ steps.remote_version.outputs.remote_version }}（多架构）"
           files: ${{ steps.build_packages.outputs.release_files }}
           prerelease: false
           make_latest: true
@@ -386,19 +220,6 @@ jobs:
       - name: 15. 更新基础 manifest
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
-          set -euo pipefail
-          REMOTE_VERSION="${{ steps.remote_version.outputs.remote_version }}"
-          BUILD_TIME="${{ steps.init.outputs.build_time }}"
-
-          sed -i -E \
-            "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2${REMOTE_VERSION}\4/" \
-            "$BASE_DIR/manifest"
-
+          sed -i -E "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*).*/\1${{ steps.remote_version.outputs.remote_version }}/" "$BASE_DIR/manifest"
           git add "$BASE_DIR/manifest"
-
-          if git diff --cached --quiet; then
-            echo "✅ manifest 无变更，跳过提交"
-          else
-            git commit -m "chore: 更新基础版本号至${REMOTE_VERSION}（打包时间：${BUILD_TIME}）"
-            git push origin HEAD:${{ github.ref_name }}
-          fi
+          git diff --cached --quiet || git commit -m "chore: 更新基础版本号至${{ steps.remote_version.outputs.remote_version }}" && git push origin HEAD:${{ github.ref_name }}
