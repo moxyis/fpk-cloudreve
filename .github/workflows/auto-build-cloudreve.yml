@@ -1,72 +1,73 @@
 name: 版本比对后自动打包多架构Cloudreve
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
+    inputs:
+      debug_mode:
+        description: "是否开启调试模式：true=只打包不推送，false=生产推送"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
   schedule:
-    - cron: '0 0 * * *'  
+    - cron: '0 0 * * *'
 
-# 全局调试开关：true=调试（禁用推送），false=生产
 env:
-  DEBUG_MODE: "false"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
 
 jobs:
   build-multi-arch:
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
       pull-requests: read
+
     steps:
-      # ===================== 第一步：克隆仓库 & 初始化基础目录 =====================
-      - name: 1. 检出当前仓库（含Cloudreve基础目录）
-        uses: actions/checkout@v4
+      - name: 1. 检出当前仓库
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 2. 配置Git身份（调试模式仅本地生效）
+      - name: 2. 配置Git身份
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # 调试模式：输出仓库信息
-          if [ "$DEBUG_MODE" = "true" ]; then
-            echo "===== 调试：当前仓库目录 ====="
-            ls -lh
-            echo "=============================="
-          fi
 
-      # ===================== 新增：设置中国时区并获取格式化时间 =====================
-      - name: 3. 初始化时区并获取中国时区打包时间
+          echo "当前 DEBUG_MODE=$DEBUG_MODE"
+          echo "当前目录："
+          ls -lh
+
+      - name: 3. 获取中国时区打包时间
         id: build_time
         run: |
-          # 设置时区为上海（UTC+8）
-          sudo timedatectl set-timezone Asia/Shanghai
-          echo "✅ 已切换时区为：Asia/Shanghai"
-          
-          # 获取格式化的中国时间（年-月-日 时:分:秒）
-          BUILD_TIME=$(date "+%Y-%m-%d %H:%M:%S")
+          BUILD_TIME=$(TZ='Asia/Shanghai' date "+%Y-%m-%d %H:%M:%S")
           echo "✅ 中国时区打包时间：$BUILD_TIME"
           echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
 
-      # ===================== 第二步：版本比对（核心前置） =====================
-      - name: 4. 读取基础manifest的版本号（确保基础目录完整）
+      - name: 4. 读取基础manifest版本号
         id: read_version
         run: |
-          # 初始化基础Cloudreve目录及子目录（关键修复：确保app/bin存在）
           mkdir -p Cloudreve/app/bin Cloudreve/app/conf
           MANIFEST_PATH="Cloudreve/manifest"
-          
-          # 初始化manifest文件（若不存在）
+
           if [ ! -f "$MANIFEST_PATH" ]; then
             echo "version: 0.0.0" > "$MANIFEST_PATH"
             echo "platform: x86" >> "$MANIFEST_PATH"
-            git add "$MANIFEST_PATH"
-            echo "⚠️ 初始化基础manifest文件，版本号：0.0.0"
+            echo "⚠️ 初始化基础manifest文件"
           fi
 
-          # 读取统一的版本号（忽略platform）
           LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "$MANIFEST_PATH" \
             | tr -d '"' | tr -d "'" | sed 's/^v//' | xargs)
+
+          if [ -z "$LOCAL_VERSION" ]; then
+            LOCAL_VERSION="0.0.0"
+          fi
+
           echo "本地基础版本号：$LOCAL_VERSION"
           echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
 
@@ -77,270 +78,234 @@ jobs:
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest" \
             | jq -r '.tag_name' | sed 's/^v//' | xargs)
-          
+
           if [ -z "$REMOTE_VERSION" ] || [ "$REMOTE_VERSION" = "null" ]; then
             echo "❌ 获取远程版本失败"
             exit 1
           fi
-          
+
           echo "官方最新版本号：$REMOTE_VERSION"
           echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
 
-      - name: 6. 版本比对，判断是否需要更新
+      - name: 6. 版本比对
         id: compare
         run: |
+          if [ "$DEBUG_MODE" = "true" ]; then
+            echo "⚠️ 调试模式：强制执行打包测试"
+            echo "need_update=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           if [ "${{ steps.read_version.outputs.local_version }}" = "${{ steps.remote_version.outputs.remote_version }}" ]; then
-            echo "✅ 本地版本与官方一致（${{ steps.remote_version.outputs.remote_version }}），无需打包"
+            echo "✅ 本地版本与官方一致，无需打包"
             echo "need_update=false" >> $GITHUB_OUTPUT
           else
-            echo "🔄 版本不一致，开始多架构打包流程"
+            echo "🔄 版本不一致，开始打包"
             echo "need_update=true" >> $GITHUB_OUTPUT
           fi
 
-      # ===================== 第三步：版本不一致时执行多架构打包 =====================
-      - name: 7. 复制基础目录并修改platform字段（确保子目录完整）
+      - name: 7. 复制基础目录并修改platform字段
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          # 1. 先删除旧的架构目录（避免残留）
           rm -rf Cloudreve-x86 Cloudreve-arm
-          
-          # 2. 复制基础Cloudreve目录（含完整子目录）
+
           cp -r Cloudreve Cloudreve-x86
           cp -r Cloudreve Cloudreve-arm
-          
-          # 关键修复：强制创建app/bin目录（防止复制遗漏）
+
           mkdir -p Cloudreve-x86/app/bin Cloudreve-x86/app/conf
           mkdir -p Cloudreve-arm/app/bin Cloudreve-arm/app/conf
-          echo "✅ 复制基础目录并确保子目录完整：Cloudreve-x86 / Cloudreve-arm"
 
-          # 3. 修改x86目录的platform为x86，更新版本号
           sed -i -E \
             -e "s/(^[[:space:]]*platform[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2x86\4/" \
             -e "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2${{ steps.remote_version.outputs.remote_version }}\4/" \
             Cloudreve-x86/manifest
-          
-          # 4. 修改arm目录的platform为arm，更新版本号
+
           sed -i -E \
             -e "s/(^[[:space:]]*platform[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2arm\4/" \
             -e "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2${{ steps.remote_version.outputs.remote_version }}\4/" \
             Cloudreve-arm/manifest
-          
-          # 调试模式：输出修改后的manifest和目录结构
-          if [ "$DEBUG_MODE" = "true" ]; then
-            echo "===== 调试：x86 manifest ====="
-            cat Cloudreve-x86/manifest
-            echo "===== 调试：arm manifest ====="
-            cat Cloudreve-arm/manifest
-            echo "===== 调试：x86目录结构 ====="
-            ls -lhR Cloudreve-x86/
-            echo "=============================="
-          fi
 
-      - name: 8. 下载并安装fnpack打包工具
+          echo "x86 manifest:"
+          cat Cloudreve-x86/manifest
+
+          echo "arm manifest:"
+          cat Cloudreve-arm/manifest
+
+      - name: 8. 下载并安装fnpack
         if: steps.compare.outputs.need_update == 'true'
         run: |
           FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.2.0-linux-amd64"
           curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
           chmod +x /usr/local/bin/fnpack
-          
-          if ! command -v fnpack &>/dev/null; then
-            echo "❌ fnpack安装失败"
-            exit 1
-          fi
-          echo "✅ fnpack安装完成：$(which fnpack)"
 
-      - name: 9. 批量打包x86/arm架构（核心修复：文件路径+校验）
+          fnpack version || true
+          which fnpack
+
+      - name: 9. 批量打包x86/arm
         if: steps.compare.outputs.need_update == 'true'
         id: build_packages
         run: |
           set -euo pipefail
-          
-          # 定义架构映射：目录名 → 资产匹配关键词 → 打包文件名
+
           declare -A ARCH_CONFIG=(
             ["x86"]="linux_amd64.tar.gz"
             ["arm"]="linux_arm64.tar.gz"
           )
-          
-          # 创建产物目录
+
           mkdir -p /tmp/cloudreve-packages
-          # 初始化文件列表（用换行分隔，而非空格）
           RELEASE_FILES=""
 
-          # 遍历架构打包
-          for ARCH in "${!ARCH_CONFIG[@]}"; do
+          RELEASE_DATA=$(curl -sSL --retry 3 --connect-timeout 10 \
+            "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest")
+
+          for ARCH in x86 arm; do
             DIR_NAME="Cloudreve-$ARCH"
-            ASSET_MATCH=${ARCH_CONFIG[$ARCH]}
+            ASSET_MATCH="${ARCH_CONFIG[$ARCH]}"
             BIN_DIR="$DIR_NAME/app/bin"
-            echo -e "\n========== 开始打包 $ARCH 架构 =========="
 
-            # 关键修复：再次校验并创建bin目录（双重保障）
+            echo ""
+            echo "========== 开始打包 $ARCH =========="
+
             mkdir -p "$BIN_DIR"
-            echo "✅ 确保 $ARCH 二进制目录存在：$BIN_DIR"
 
-            # 1. 获取对应架构的下载链接
-            RELEASE_DATA=$(curl -sSL --retry 3 --connect-timeout 10 \
-              "https://api.github.com/repos/cloudreve/Cloudreve/releases/latest")
             DOWNLOAD_URL=$(echo "$RELEASE_DATA" | jq -r \
               '.assets[] | select(.name | contains("'"$ASSET_MATCH"'")) | .browser_download_url' | head -n1)
-            
+
             if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-              echo "❌ 未找到 $ARCH 架构的资产（匹配：$ASSET_MATCH）"
-              continue
+              echo "❌ 未找到 $ARCH 架构资产：$ASSET_MATCH"
+              exit 1
             fi
-            echo "✅ $ARCH 下载链接：$DOWNLOAD_URL"
 
-            # 2. 下载并解压二进制文件
+            echo "下载地址：$DOWNLOAD_URL"
+
+            rm -rf /tmp/cloudreve_extract_$ARCH
+            mkdir -p /tmp/cloudreve_extract_$ARCH
+
             curl -SL --retry 3 --connect-timeout 10 -o /tmp/$ARCH.tar.gz "$DOWNLOAD_URL"
-            tar -zxf /tmp/$ARCH.tar.gz -C /tmp
-            if [ ! -f "/tmp/cloudreve" ]; then
-              echo "❌ $ARCH 解压失败，未找到二进制文件"
-              rm -f /tmp/$ARCH.tar.gz
-              continue
-            fi
-            echo "✅ $ARCH 二进制文件解压完成"
+            tar -zxf /tmp/$ARCH.tar.gz -C /tmp/cloudreve_extract_$ARCH
 
-            # 3. 替换目录内的二进制文件（明确指定文件名）
-            mv /tmp/cloudreve "$BIN_DIR/cloudreve"
+            CLOUDFILE=$(find /tmp/cloudreve_extract_$ARCH -type f -name "cloudreve" | head -n1)
+
+            if [ -z "$CLOUDFILE" ]; then
+              echo "❌ 解压后未找到 cloudreve 二进制文件"
+              find /tmp/cloudreve_extract_$ARCH -type f
+              exit 1
+            fi
+
+            cp "$CLOUDFILE" "$BIN_DIR/cloudreve"
             chmod +x "$BIN_DIR/cloudreve"
-            rm -f /tmp/$ARCH.tar.gz /tmp/cloudreve
-            echo "✅ $ARCH 二进制文件已替换到：$BIN_DIR/cloudreve"
 
-            # 4. 验证二进制文件是否存在
-            if [ ! -f "$BIN_DIR/cloudreve" ]; then
-              echo "❌ $ARCH 二进制文件替换失败，文件不存在"
-              continue
-            fi
+            echo "二进制文件："
+            ls -lh "$BIN_DIR/cloudreve"
 
-            # 5. 执行fnpack打包
             cd "$DIR_NAME"
-            echo "🚀 执行打包命令：fnpack build"
             fnpack build
             cd -
 
-            # 6. 移动打包产物（校验文件存在性）
             FPK_FILE=$(find "$DIR_NAME" -name "*.fpk" -type f | head -n1)
+
             if [ -z "$FPK_FILE" ]; then
-              echo "❌ $ARCH 打包失败，未找到fpk文件"
-              continue
+              echo "❌ $ARCH 打包失败，未找到 .fpk 文件"
+              find "$DIR_NAME" -type f
+              exit 1
             fi
-            # 校验FPK文件是否真的存在
-            if [ ! -f "$FPK_FILE" ]; then
-              echo "❌ $ARCH FPK文件路径无效：$FPK_FILE"
-              continue
-            fi
-            
+
             FPK_NAME="fpk-cloudreve-$ARCH-v${{ steps.remote_version.outputs.remote_version }}.fpk"
             FPK_DEST="/tmp/cloudreve-packages/$FPK_NAME"
-            mv "$FPK_FILE" "$FPK_DEST"
-            
-            # 校验移动后的文件
-            if [ ! -f "$FPK_DEST" ]; then
-              echo "❌ $ARCH FPK文件移动失败：$FPK_DEST"
-              continue
-            fi
-            
-            # 关键修复：用换行分隔文件路径（符合action-gh-release要求）
-            RELEASE_FILES+="$FPK_DEST"$'\n'
-            echo "✅ $ARCH 打包完成：$FPK_DEST"
 
-            # 调试模式：输出文件详情
-            if [ "$DEBUG_MODE" = "true" ]; then
-              echo "===== 调试：$ARCH 产物信息 ====="
-              ls -lh "$FPK_DEST"
-              sha256sum "$FPK_DEST"
-              echo "=============================="
-            fi
+            mv "$FPK_FILE" "$FPK_DEST"
+
+            echo "✅ $ARCH 打包完成：$FPK_DEST"
+            ls -lh "$FPK_DEST"
+            sha256sum "$FPK_DEST"
+
+            RELEASE_FILES+="$FPK_DEST"$'\n'
           done
 
-          # 清理空行，输出产物列表
           RELEASE_FILES=$(echo "$RELEASE_FILES" | sed '/^$/d')
-          echo -e "\n✅ 所有架构打包完成，产物列表："
-          echo "$RELEASE_FILES"
-          ls -lh /tmp/cloudreve-packages/
-          
-          # 传递产物路径给后续步骤（保留换行格式）
+
+          echo ""
+          echo "========== 最终产物 =========="
+          ls -lh /tmp/cloudreve-packages
+
           echo "release_files<<EOF" >> $GITHUB_OUTPUT
           echo "$RELEASE_FILES" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+
           echo "package_dir=/tmp/cloudreve-packages" >> $GITHUB_OUTPUT
 
-      # ===================== 第四步：调试/生产模式分支 =====================
-      - name: 10. 生产模式：推送产物到FnDepot仓库
+      - name: 10. Debug模式：仅验证产物
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'true'
+        run: |
+          echo "⚠️ 当前为 Debug 模式，不推送 FnDepot，不创建 Release，不更新 manifest"
+          echo "产物目录："
+          ls -lh ${{ steps.build_packages.outputs.package_dir }}
+
+          echo "校验文件："
+          sha256sum ${{ steps.build_packages.outputs.package_dir }}/*.fpk
+
+      - name: 11. 生产模式：推送产物到FnDepot
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
-          # 克隆FnDepot仓库
           git clone https://${{ secrets.FnDepot_PAT }}@github.com/moxyis/FnDepot.git /tmp/FnDepot
-          
-          # 复制产物到对应目录
+
           mkdir -p /tmp/FnDepot/fpk-cloudreve/x86 /tmp/FnDepot/fpk-cloudreve/arm
+
           cp /tmp/cloudreve-packages/fpk-cloudreve-x86-* /tmp/FnDepot/fpk-cloudreve/x86/
           cp /tmp/cloudreve-packages/fpk-cloudreve-arm-* /tmp/FnDepot/fpk-cloudreve/arm/
           cp /tmp/cloudreve-packages/fpk-cloudreve-x86-* /tmp/FnDepot/fpk-cloudreve/fpk-cloudreve.fpk
-          
-           # 更新版本配置（核心：仅修改fpk-cloudreve.version，保留所有其他内容）
+
           cd /tmp/FnDepot
-          # 直接更新version字段，不初始化文件（假设fnpack.json已存在且有完整结构）
+
           jq --arg ver "${{ steps.remote_version.outputs.remote_version }}" \
             '.["fpk-cloudreve"].version = $ver' \
             fnpack.json > fnpack.tmp && mv fnpack.tmp fnpack.json
-          
-          # 提交并推送
+
           git add fpk-cloudreve/ fnpack.json
-          git commit -m "chore: 更新Cloudreve多架构版本至${{ steps.remote_version.outputs.remote_version }}（打包时间：${{ steps.build_time.outputs.build_time }}）" || echo "无变更"
-          git push origin main
-          echo "✅ 产物已推送到FnDepot仓库"
 
-      - name: 11. 调试模式：仅输出产物信息（禁用推送）
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'true'
-        run: |
-          echo -e "\n⚠️ 调试模式：所有推送操作已禁用"
-          echo "===== 最终产物清单 ====="
-          ls -lh ${{ steps.build_packages.outputs.package_dir }}
-          echo "========================"
-          echo "✅ 调试完成，产物存储路径：${{ steps.build_packages.outputs.package_dir }}"
-          echo "✅ 中国时区打包时间：${{ steps.build_time.outputs.build_time }}"
+          if git diff --cached --quiet; then
+            echo "✅ FnDepot 无变更，跳过提交"
+          else
+            git commit -m "chore: 更新Cloudreve多架构版本至${{ steps.remote_version.outputs.remote_version }}（打包时间：${{ steps.build_time.outputs.build_time }}）"
+            git push origin main
+          fi
 
-      - name: 12. 生产模式：创建GitHub Release（核心修复：参数+文件路径+时区时间）
+      - name: 12. 生产模式：创建GitHub Release
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          # 修复：移除废弃的overwrite，使用overwrite_files
           overwrite_files: true
-          # Release标签
           tag_name: "cloudreve-v${{ steps.remote_version.outputs.remote_version }}"
-          # Release标题
           name: "Cloudreve v${{ steps.remote_version.outputs.remote_version }}（多架构）"
-          # Release描述（使用中国时区时间）
           body: |
             ## Cloudreve 多架构自动打包
+
             - 版本：v${{ steps.remote_version.outputs.remote_version }}
             - 支持架构：x86 / arm
             - 打包时间：${{ steps.build_time.outputs.build_time }}
             - 打包工具：fnpack 1.2.0
-          # 关键修复：使用换行分隔的文件路径（正确传递）
+
+            ### 文件
+            - fpk-cloudreve-x86-v${{ steps.remote_version.outputs.remote_version }}.fpk
+            - fpk-cloudreve-arm-v${{ steps.remote_version.outputs.remote_version }}.fpk
           files: ${{ steps.build_packages.outputs.release_files }}
-          # 其他参数
           prerelease: false
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ===================== 第五步：更新基础manifest版本号 =====================
-      - name: 13. 更新基础manifest版本号
-        if: steps.compare.outputs.need_update == 'true'
+      - name: 13. 生产模式：更新基础manifest版本号
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
-          # 更新基础manifest的版本号
           sed -i -E \
             "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)(.+)([\"']?)/\1\2${{ steps.remote_version.outputs.remote_version }}\4/" \
             Cloudreve/manifest
-          
-          # 生产模式推送，调试模式仅暂存
+
           git add Cloudreve/manifest
-          if [ "$DEBUG_MODE" = "false" ]; then
+
+          if git diff --cached --quiet; then
+            echo "✅ manifest 无变更，跳过提交"
+          else
             git commit -m "chore: 更新基础版本号至${{ steps.remote_version.outputs.remote_version }}（打包时间：${{ steps.build_time.outputs.build_time }}）"
             git push origin HEAD:${{ github.ref_name }}
-            echo "✅ 基础manifest版本号已推送"
-          else
-            echo "⚠️ 调试模式：基础manifest已更新，仅本地暂存未推送"
-            echo "✅ 中国时区打包时间：${{ steps.build_time.outputs.build_time }}"
           fi
