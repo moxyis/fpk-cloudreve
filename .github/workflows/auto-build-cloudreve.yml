@@ -327,38 +327,88 @@ jobs:
           rm -rf /tmp/FnDepot
           git clone "https://${{ secrets.FnDepot_PAT }}@github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
 
-      - name: 10. 推送 fpk 到 FnDepot
+      - name: 10. 推送多架构 FPK 到 FnDepot
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
           set -euo pipefail
 
-          mkdir -p "/tmp/FnDepot/$FNDEPOT_APP_DIR"
+          VERSION="${{ steps.remote_version.outputs.remote_version }}"
+          TARGET="/tmp/FnDepot/$FNDEPOT_APP_DIR"
 
-          for ARCH in $ARCH_LIST; do
-            cp "$PACKAGE_DIR/$ARCH/${APP_ID}.fpk" \
-               "/tmp/FnDepot/$FNDEPOT_APP_DIR/${APP_ID}_${ARCH}.fpk"
+          mkdir -p "$TARGET/x86" "$TARGET/arm"
+
+          for ARCH in x86 arm; do
+            SOURCE="$PACKAGE_DIR/$ARCH/${APP_ID}.fpk"
+            test -s "$SOURCE"
+
+            # 固定文件名：供最新版本下载
+            cp "$SOURCE" "$TARGET/${APP_ID}_${ARCH}.fpk"
+
+            # 版本化文件名：保留历史版本
+            cp "$SOURCE" \
+              "$TARGET/$ARCH/${APP_ID}-${ARCH}-v${VERSION}.fpk"
+
+            echo "已保存 $ARCH / $VERSION"
           done
 
-          echo "FnDepot fpk 文件："
-          find "/tmp/FnDepot/$FNDEPOT_APP_DIR" -type f -name "*.fpk" -print
-
-      - name: 11. 更新 FnDepot fnpack.json
+      - name: 11. 更新 FnDepot V2 应用源
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
           set -euo pipefail
 
-          REMOTE_VERSION="${{ steps.remote_version.outputs.remote_version }}"
+          VERSION="${{ steps.remote_version.outputs.remote_version }}"
           JSON_FILE="/tmp/FnDepot/fnpack.json"
+          TARGET="/tmp/FnDepot/$FNDEPOT_APP_DIR"
 
-          if [ ! -f "$JSON_FILE" ]; then
-            echo '{}' > "$JSON_FILE"
-          fi
+          test -f "$JSON_FILE"
+          jq -e '.schema_version == "2" and (.apps | type == "object")' "$JSON_FILE" >/dev/null
+          jq -e --arg app "$APP_ID" '.apps[$app] | type == "object"' "$JSON_FILE" >/dev/null
 
-          jq --arg app "$APP_ID" --arg ver "$REMOTE_VERSION" \
-            '.[$app] = (.[$app] // {}) | .[$app].version = $ver' \
-            "$JSON_FILE" > "$JSON_FILE.tmp"
+          X86_FILE="$TARGET/x86/${APP_ID}-x86-v${VERSION}.fpk"
+          ARM_FILE="$TARGET/arm/${APP_ID}-arm-v${VERSION}.fpk"
+
+          X86_SIZE=$(stat -c%s "$X86_FILE")
+          ARM_SIZE=$(stat -c%s "$ARM_FILE")
+          X86_SHA=$(sha256sum "$X86_FILE" | cut -d' ' -f1)
+          ARM_SHA=$(sha256sum "$ARM_FILE" | cut -d' ' -f1)
+
+          jq \
+            --arg app "$APP_ID" \
+            --arg ver "$VERSION" \
+            --arg x86_url "./${APP_ID}/x86/${APP_ID}-x86-v${VERSION}.fpk" \
+            --arg arm_url "./${APP_ID}/arm/${APP_ID}-arm-v${VERSION}.fpk" \
+            --arg x86_sha "$X86_SHA" \
+            --arg arm_sha "$ARM_SHA" \
+            --argjson x86_size "$X86_SIZE" \
+            --argjson arm_size "$ARM_SIZE" \
+            '
+            .apps[$app].releases = (.apps[$app].releases // {}) |
+            .apps[$app].platform = ["x86", "arm"] |
+            .apps[$app].releases[$ver] = {
+              "changelog": ("Cloudreve 自动构建版本 " + $ver),
+              "packages": {
+                "x86": {
+                  "download_url": $x86_url,
+                  "size": $x86_size,
+                  "sha256": $x86_sha
+                },
+                "arm": {
+                  "download_url": $arm_url,
+                  "size": $arm_size,
+                  "sha256": $arm_sha
+                }
+              }
+            }
+            ' "$JSON_FILE" > "$JSON_FILE.tmp"
+
+          jq -e --arg app "$APP_ID" --arg ver "$VERSION" \
+            '.schema_version == "2" and
+             (.apps[$app].releases[$ver].packages | has("x86") and has("arm"))' \
+            "$JSON_FILE.tmp" >/dev/null
 
           mv "$JSON_FILE.tmp" "$JSON_FILE"
+
+          echo "Cloudreve V2 更新完成：$VERSION"
 
       - name: 12. 更新 FnDepot README
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
